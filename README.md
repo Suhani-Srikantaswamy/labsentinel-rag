@@ -2,110 +2,117 @@
 
 **Multimodal Evidence-Grounded Retrieval for Automated Laboratory Incident Investigation**
 
-> A multimodal Retrieval-Augmented Generation (RAG) system that autonomously investigates laboratory safety incidents from video footage, grounding every finding in institutional SOPs and comparable historical cases.
+> Upload any lab manual + any CCTV/incident video → get a structured safety violation report with exact timestamps, cited rules, and corrective actions. Zero hardcoded rules — everything comes from your uploaded manual.
+
+🔗 **Live Repo:** https://github.com/Suhani-Srikantaswamy/labsentinel-rag
 
 ---
 
-## Overview
+## What It Does
 
-Investigating laboratory safety incidents is currently a manual, time-consuming process. An investigator must review CCTV footage, cross-reference safety SOPs and equipment manuals, and search historical incident records.
+LabSentinel-RAG investigates lab safety incidents automatically using a 5-stage AI pipeline:
 
-**LabSentinel-RAG automates this entire workflow** using a 5-stage multimodal AI pipeline:
-
-| Stage | Component | Description |
-|-------|-----------|-------------|
-| **1** | Input | Incident video + Lab SOPs + Equipment Manuals + Incident Records |
-| **2** | Video Analysis | GPT-4o Vision extracts a timestamped event timeline |
-| **3** | RAG Retrieval | ChromaDB retrieves relevant SOP clauses & similar past incidents |
-| **4** | LLM Reasoning | GPT-4o confirms violations, explains root cause, recommends actions |
-| **5** | Output | JSON + HTML + PDF investigation report |
+| Stage | What Happens |
+|-------|-------------|
+| **1. Input** | Upload any lab manual (PDF/DOCX/TXT) + incident video (any length) |
+| **2. Video Analysis** | Gemini Vision analyses every frame using a structured safety checklist |
+| **3. RAG Retrieval** | Retrieves the most relevant passages from your manual for each event |
+| **4. LLM Reasoning** | Confirms violations, cites the exact rule, gives corrective actions |
+| **5. Report** | Timestamped HTML + PDF report — every violation linked to exact video second |
 
 ---
 
 ## Key Features
 
-- **Multimodal input**: Accepts CCTV video, images, textual incident descriptions
-- **Evidence-grounded**: Every violation is linked to specific SOP clauses (not just model knowledge)
-- **Timestamp-linked evidence**: Each finding includes the video frame where it was detected
-- **Similar incident retrieval**: Finds comparable past cases for pattern recognition
-- **Structured output**: Machine-readable JSON + human-readable HTML/PDF report
-- **Autonomous**: Produces a complete investigation report from a single video input
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                       LabSentinel-RAG                           │
-│          Multimodal Evidence-Grounded Incident Investigation    │
-└─────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│   1. INPUT   │──▶│ 2. VIDEO     │──▶│  3. RETRIEVE │──▶│ 4. REASON    │──▶│  5. OUTPUT   │
-│              │   │    ANALYSIS  │   │     (RAG)    │   │    (LLM)     │   │              │
-│ • Video      │   │              │   │              │   │              │   │ • Timeline   │
-│ • Images     │   │ • Frame      │   │ • SOPs       │   │ • Confirm    │   │ • Violations │
-│ • SOPs       │   │   extraction │   │ • Manuals    │   │   violations │   │ • SOP refs   │
-│ • Manuals    │   │ • VLM event  │   │ • Past       │   │ • Root cause │   │ • Past cases │
-│ • Incidents  │   │   detection  │   │   incidents  │   │ • Actions    │   │ • Actions    │
-└──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
-                                              ▲
-                                    ┌─────────────────┐
-                                    │  KNOWLEDGE BASE  │
-                                    │  (ChromaDB +     │
-                                    │  SentenceXformrs)│
-                                    └─────────────────┘
-```
+- **Zero hardcoded rules** — upload a chemistry manual → chemistry rules; biology manual → biology rules
+- **Exact timestamps** — every finding shows the precise second in the video
+- **Rule citation** — quotes the exact section from your manual
+- **Any lab type** — chemistry, biology, cleanroom, hospital, industrial
+- **Any video length** — processes hours of CCTV footage in chunks automatically
+- **Multi-key rotation** — supports multiple Gemini API keys, rotates when one hits quota
+- **Fully free** — runs on Google Gemini free tier (no credit card needed)
 
 ---
 
 ## Quick Start
 
-### 1. Installation
+### 1. Install
 
 ```bash
+git clone https://github.com/Suhani-Srikantaswamy/labsentinel-rag.git
 cd labsentinel-rag
 pip install -r requirements.txt
 ```
 
-### 2. Configure API Key
+### 2. Get a FREE API Key
+
+Go to **https://aistudio.google.com/apikey** → sign in with Google → Create API key
+
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and add your OpenAI API key
 ```
 
-### 3. Build the Knowledge Base (one-time)
+Open `.env` and add your key:
+```
+GOOGLE_API_KEY=your-gemini-key-here
+```
+
+To add multiple keys for automatic rotation (recommended):
+```
+GOOGLE_API_KEY=key1
+GOOGLE_API_KEY_2=key2
+GOOGLE_API_KEY_3=key3
+```
+
+### 4. Build Knowledge Base (optional but improves accuracy)
 
 ```bash
-# Add your SOP documents to data/sops/
-# Add equipment manuals to data/manuals/
-# Add past incident records to data/incidents/
-
 python main.py build-kb
 ```
 
-### 4. Run an Investigation
-
-```bash
-python main.py investigate data/videos/incident.mp4
-```
-
-### 5. Try the Mock Demo (no API key needed)
-
-```bash
-python demo_mock.py
-# Open outputs/report_*.html in your browser
-```
-
-### 6. Launch the Web UI
+### 5. Launch the Web UI
 
 ```bash
 python app.py
-# Open http://localhost:7860
 ```
+
+Open **http://localhost:7860**
+
+---
+
+## How to Use the Web UI
+
+1. **Upload your lab manual** — PDF, DOCX, or TXT (any lab's safety manual)
+2. **Upload a video** or paste a YouTube URL
+3. Click **🚀 Run Investigation**
+4. View the full report inline — download PDF with one click
+
+---
+
+## Sample Files Included
+
+| File | Description |
+|------|-------------|
+| `sample_files/chemistry_lab_manual.txt` | Full chemistry lab safety manual (PPE, acids, fume hoods, waste) |
+| `sample_files/biology_lab_manual.txt` | BSL-2 biology/microbiology lab manual (biosafety, BSC, sharps) |
+| `scripts/create_sample_video.py` | Generates a synthetic 96s lab incident video with 6 violations |
+| `data/sops/` | Sample SOPs for knowledge base |
+| `data/incidents/` | Sample historical incident records |
+
+---
+
+## Verified Test Datasets
+
+All links confirmed working:
+
+| Video | Manual | What It Tests |
+|-------|--------|--------------|
+| [Fume Hood Safety (4min)](https://www.youtube.com/watch?v=PZRQMK6udZs) | [MIT Chemistry Manual](https://chemistry.mit.edu/wp-content/uploads/2026/01/2026-Chemical-Hygiene-Manual.pdf) | Fume hood, PPE |
+| [Lab Safety DOs & DON'Ts (8min)](https://www.youtube.com/watch?v=saXFQR86ziM) | [MIT Safety Rules](https://web.mit.edu/5.310/www/safety.pdf) | Multiple violations |
+| [Lab Safety Training (40min)](https://www.youtube.com/watch?v=TlhVR0xQLJQ) | [UC Davis Lab Manual](https://chemistry.ucdavis.edu/sites/g/files/dgvnsk196/files/inline-files/CHE%202B%20Student%20Lab%20Manual%20Spring%202023.pdf) | Full training |
+| [Biosafety Cabinet (4min)](https://www.youtube.com/watch?v=KSH_aaQSNyE) | `sample_files/biology_lab_manual.txt` | Biological safety |
 
 ---
 
@@ -113,54 +120,59 @@ python app.py
 
 ```
 labsentinel-rag/
-├── src/
-│   ├── vlm/                    # Stage 2: Vision-Language Model video analysis
-│   │   ├── frame_extractor.py  #   Temporal + motion-based frame sampling
-│   │   └── video_analyzer.py   #   GPT-4o Vision per-frame + timeline analysis
-│   ├── ingestion/              # Stage 0: Knowledge base construction
-│   │   ├── document_loader.py  #   PDF/DOCX/TXT/JSON chunking
-│   │   └── knowledge_base_builder.py  # ChromaDB indexing
-│   ├── retrieval/              # Stage 3: RAG evidence retrieval
-│   │   └── retriever.py        #   Hybrid SOP + manual + incident retrieval
-│   ├── reasoning/              # Stage 4: LLM violation reasoning
-│   │   └── violation_reasoner.py  # Evidence-grounded violation analysis
-│   ├── report/                 # Stage 5: Report generation
-│   │   └── report_generator.py #   JSON + HTML + PDF output
-│   ├── utils/                  # Shared models and logging
-│   │   ├── models.py           #   Pydantic data models
-│   │   └── logger.py           #   Structured logging
-│   └── pipeline.py             # Main orchestrator
-├── data/
-│   ├── sops/                   # Lab Safety SOPs
-│   ├── manuals/                # Equipment manuals
-│   ├── incidents/              # Historical incident records
-│   ├── videos/                 # Input videos
-│   └── embeddings/             # ChromaDB vector store
-├── outputs/                    # Generated reports
-├── tests/                      # Unit and integration tests
+├── app.py                  # Gradio web UI
+├── main.py                 # CLI (build-kb, investigate, stats)
 ├── config/
-│   └── settings.py             # Global configuration (Pydantic)
-├── main.py                     # CLI entry point (Typer)
-├── app.py                      # Gradio web demo
-├── demo_mock.py                # Mock demo (no API key needed)
-└── requirements.txt
+│   └── settings.py         # All config via environment variables
+├── src/
+│   ├── vlm/                # Video frame extraction + Gemini Vision analysis
+│   ├── ingestion/          # Document loading + ChromaDB indexing
+│   ├── retrieval/          # RAG retrieval from knowledge base
+│   ├── reasoning/          # LLM violation analysis + report generation
+│   ├── report/             # HTML + PDF + JSON report rendering
+│   └── utils/              # Models, logging, LLM client (key rotation)
+├── data/
+│   ├── sops/               # Your lab SOPs (add your own here)
+│   ├── manuals/            # Equipment manuals
+│   └── incidents/          # Historical incident records
+├── sample_files/           # Ready-to-use sample lab manuals
+├── scripts/                # Sample video generator
+└── tests/                  # Unit tests (pytest)
 ```
 
 ---
 
 ## Configuration
 
-Edit `config/settings.py` or set environment variables:
+All settings via `.env` — nothing hardcoded:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `llm.model` | `gpt-4o` | VLM for video frame analysis |
-| `video.frame_sample_rate` | `2` | Sample 1 frame per N seconds |
-| `video.max_frames` | `30` | Maximum frames per video |
-| `rag.embedding_model` | `all-MiniLM-L6-v2` | Sentence transformer model |
-| `rag.chunk_size` | `512` | Words per document chunk |
-| `rag.top_k_sops` | `3` | SOP clauses retrieved per event |
-| `rag.top_k_incidents` | `3` | Historical incidents per event |
+```bash
+# Model
+LABSENTINEL_GEMINI_MODEL=gemini-3.5-flash-lite   # vision model
+
+# Video analysis
+LABSENTINEL_FRAME_RATE=3          # analyse 1 frame every N seconds
+LABSENTINEL_MAX_FRAMES=60         # total frame cap
+LABSENTINEL_MOTION_THRESHOLD=10.0 # motion sensitivity
+
+# Retrieval
+LABSENTINEL_EMBED_MODEL=all-MiniLM-L6-v2
+LABSENTINEL_TOP_K_SOPS=5
+LABSENTINEL_SIM_THRESHOLD=0.20
+
+# Output
+LABSENTINEL_OUTPUT_FORMATS=json,html,pdf
+```
+
+---
+
+## Free Tier Limits
+
+| Provider | Cost | Limit |
+|----------|------|-------|
+| Google Gemini | **Free** | ~20 req/day per key |
+| With 4 keys | **Free** | ~80 req/day = ~5 full investigations/day |
+| OpenAI GPT-4o | ~$0.30/run | Unlimited |
 
 ---
 
@@ -172,32 +184,6 @@ pytest tests/ -v
 
 ---
 
-## Comparison with Existing Systems
+## Acknowledgements
 
-| System | Domain | Timestamp Evidence | SOP Grounding | Historical Cases | Structured Report |
-|--------|--------|--------------------|---------------|------------------|-------------------|
-| AcciVid (2024) | Construction | ❌ | ❌ | ❌ | ❌ |
-| TrafficRAG (2026) | Traffic/Legal | ❌ | ❌ | Partial | Static |
-| AccidentGPT (2024) | Traffic | ❌ | ❌ | ❌ | ❌ |
-| **LabSentinel-RAG** | **Laboratory** | **✅** | **✅** | **✅** | **✅** |
-
----
-
-## Citation
-
-```bibtex
-@article{labsentinel2024,
-  title={LabSentinel-RAG: Multimodal Evidence-Grounded Retrieval for 
-         Automated Laboratory Incident Investigation},
-  year={2024},
-  abstract={A multimodal RAG system for automated laboratory incident 
-            investigation that grounds every detected violation in 
-            institutional SOP evidence and comparable historical cases.}
-}
-```
-
----
-
-## Keywords
-
-Multimodal RAG · Video Understanding · Vision-Language Models · Incident Investigation · Evidence Grounding · Temporal Reasoning · Laboratory Safety · Hybrid Retrieval
+Built with: Google Gemini, ChromaDB, SentenceTransformers, Gradio, LangChain, ReportLab
