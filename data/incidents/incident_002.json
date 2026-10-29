@@ -1,0 +1,25 @@
+{
+  "incident_id": "INC-2023-089",
+  "title": "Fume Hood Bypass During Solvent Evaporation — Ethanol Vapour Accumulation",
+  "date": "2023-11-28",
+  "location": "Biochemistry Lab, Room 318",
+  "severity": "high",
+  "personnel_involved": "Postdoctoral researcher",
+  "description": "A postdoctoral researcher was evaporating ethanol from a sample using a rotary evaporator. The fume hood was not activated prior to beginning the procedure. The sash was left in the fully raised position. Over a 20-minute period, ethanol vapour accumulated in the lab. A second researcher entering the lab detected a strong solvent odour and identified the situation. A nearby hot plate (set to 80°C) represented an ignition source. The hot plate was turned off and windows opened. No fire occurred.",
+  "violations_identified": [
+    "Volatile organic solvent work performed outside fume hood (SOP-LAB-001 Section 3.1)",
+    "Fume hood sash left in fully raised position (SOP-LAB-001 Section 3.2b)",
+    "Ignition source (hot plate) present within 3 metres of flammable vapour (SOP-CHEM-002 Section 1.1)",
+    "No verification that fume hood airflow was active before starting work (SOP-LAB-001 Section 3.2a)"
+  ],
+  "root_cause": "Researcher assumed rotary evaporator was inherently safe and did not require fume hood use. Lack of awareness of ethanol vapour flammability (LEL 3.3%). Hot plate left on from previous experiment — not turned off before new work began.",
+  "corrective_actions_taken": [
+    "Clear 'rotary evaporator MUST be used inside fume hood' sign placed on all rotary evaporators",
+    "Pre-work checklist introduced for all solvent-handling procedures",
+    "Hot plate protocol updated: all hot plates must be verified off before new experiment setup"
+  ],
+  "outcome": "No injuries. No fire. Laboratory evacuated for 45 minutes for ventilation. Near-miss report filed.",
+  "lessons_learned": "Ethanol is a flammable liquid even at room temperature. Vapour concentration can reach LEL quickly in an unventilated space. The presence of ANY ignition source (hot plate, stirrer motor, light switch) in the same area is a fire hazard.",
+  "related_sop": "SOP-LAB-001, SOP-CHEM-002",
+  "content": "Incident INC-2023-089: Fume hood not used for ethanol evaporation work. Volatile solvent fumes accumulated in lab. Hot plate (ignition source) was active nearby. Near-miss fire incident. Violations: solvent work outside fume hood, sash raised fully, ignition source present. Root cause: researcher unaware of fume hood requirement for rotary evaporator. Corrective actions: signage, pre-work checklists, hot plate protocol."
+}

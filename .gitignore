@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LabSentinel-RAG — .gitignore
+# NEVER commit API keys, secrets, videos, large embeddings, or generated files
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── SECRETS — NEVER PUSH THESE ───────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+ENV/
+
+# ── Large data files — don't push videos or big binaries ─────────────────────
+data/videos/
+data/embeddings/
+outputs/frames/
+
+# ── Generated reports (outputs stay local) ───────────────────────────────────
+outputs/report_*.json
+outputs/report_*.html
+outputs/report_*.pdf
+outputs/labsentinel.log
+
+# ── ChromaDB vector store (rebuild with build-kb) ────────────────────────────
+data/embeddings/
+
+# ── Test & IDE cache ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+*.tmp
+*.temp
+/tmp/

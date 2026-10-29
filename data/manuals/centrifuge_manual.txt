@@ -1,0 +1,95 @@
+EQUIPMENT OPERATION MANUAL
+Equipment: Eppendorf Centrifuge 5810R / 5430R Series
+Document ID: MAN-CENT-001
+Version: 2.3 | Issued: 2023-08-10
+
+=============================================================================
+SECTION 1: SAFETY PRECAUTIONS — READ BEFORE USE
+=============================================================================
+
+1.1 CRITICAL SAFETY RULES
+  WARNING: Failure to follow these instructions may result in serious injury, equipment 
+  damage, or rotor failure.
+
+  a. ALWAYS balance samples before starting a run. Imbalanced loads cause rotor wobble, 
+     vibration, and potential rotor failure. Balance to within ±0.1g across opposing positions.
+  b. NEVER open the lid during operation. The centrifuge lid interlock must be functional.
+     Do not bypass the safety interlock under any circumstances.
+  c. NEVER exceed the maximum speed (RPM) specified for your rotor. Consult the rotor 
+     specification table (Appendix A) before setting speed.
+  d. ALWAYS check tubes for cracks or damage before loading. Use only centrifuge-grade tubes 
+     rated for the intended speed and temperature.
+  e. NEVER centrifuge flammable or volatile solvents in standard rotors — risk of explosion 
+     due to motor sparks.
+  f. Use aerosol-containment rotors when centrifuging biohazardous materials.
+
+1.2 REQUIRED PPE
+  - Safety goggles (chemical splash protection if centrifuging hazardous liquids)
+  - Lab coat
+  - Gloves appropriate to sample type
+
+=============================================================================
+SECTION 2: OPERATING PROCEDURE
+=============================================================================
+
+Step 1: Pre-Run Checks
+  1.1 Inspect the rotor for cracks, corrosion, or damage — do NOT use damaged rotors.
+  1.2 Check that the rotor is properly seated and secured on the drive shaft.
+  1.3 Ensure the centrifuge chamber is clean and dry.
+
+Step 2: Sample Loading
+  2.1 Fill tubes to no more than 80% capacity to prevent leakage under centrifugal force.
+  2.2 Place balanced pairs of tubes in OPPOSING positions.
+  2.3 For odd numbers of samples, use a water-filled balance tube of equal weight.
+  2.4 Close and latch all rotor covers or buckets securely.
+
+Step 3: Setting Parameters
+  3.1 Close the centrifuge lid.
+  3.2 Set desired speed, time, and temperature.
+  3.3 Confirm the selected rotor matches the rotor loaded (programmed rotor setting).
+  3.4 Press START — verify that the RPM increases smoothly without unusual vibration.
+
+Step 4: During the Run
+  4.1 Remain near the centrifuge for the first minute to detect abnormal vibration.
+  4.2 If unusual vibration, noise, or shaking occurs — press STOP immediately.
+  4.3 Do NOT open the lid until the rotor has come to a complete stop (0 RPM).
+
+Step 5: Post-Run
+  5.1 Wait for complete stop — confirmed by RPM display reading 0.
+  5.2 Open the lid carefully and remove samples.
+  5.3 Inspect for leaks. If leakage occurred: contain, decontaminate per sample type SOP.
+  5.4 Wipe the rotor and chamber with appropriate disinfectant.
+
+=============================================================================
+SECTION 3: ROTOR COMPATIBILITY AND MAXIMUM SPEEDS
+=============================================================================
+
+  Rotor Model      | Type    | Max RPM  | Max RCF     | Max Volume
+  -----------------|---------|----------|-------------|------------
+  A-4-81           | Swing   | 4,000    | 3,220 x g   | 50 mL tubes
+  FA-45-30-11      | Fixed   | 15,000   | 21,382 x g  | 15 mL tubes
+  FA-45-6-30       | Fixed   | 25,000   | 71,000 x g  | 1.5/2.0 mL
+
+=============================================================================
+SECTION 4: TROUBLESHOOTING
+=============================================================================
+
+  Symptom                    | Cause                    | Action
+  ---------------------------|--------------------------|----------------------------------
+  Excessive vibration        | Imbalanced load          | Stop, rebalance samples
+  Lid won't open             | Rotor still spinning     | Wait — NEVER force the lid
+  Error code E01             | Imbalance detected       | Stop, rebalance, restart
+  Error code E05             | Over-temperature         | Check refrigeration; contact service
+  Rotor wobble sound         | Rotor not seated         | Stop, reattach rotor, restart
+  Sample leakage             | Overfilled / cracked tube| Decontaminate, replace tube
+
+=============================================================================
+SECTION 5: MAINTENANCE AND INSPECTION SCHEDULE
+=============================================================================
+
+  Daily:   Wipe chamber; inspect rotor visually
+  Weekly:  Lubricate rotor O-rings; clean with 70% ethanol
+  Monthly: Full rotor inspection; log in maintenance record
+  Annual:  Professional service and rotor recertification
+
+Contact: Equipment Manager, Ext. 4-EQUIP

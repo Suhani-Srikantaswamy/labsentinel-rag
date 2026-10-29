@@ -1,0 +1,25 @@
+{
+  "incident_id": "INC-2024-033",
+  "title": "PPE Non-compliance — Researcher Working Without Lab Coat and Gloves",
+  "date": "2024-04-15",
+  "location": "Organic Chemistry Lab, Room 206",
+  "severity": "medium",
+  "personnel_involved": "Visiting scholar",
+  "description": "A visiting scholar was observed working with organic solvents (dichloromethane and acetone) wearing only jeans and a t-shirt — no lab coat and no gloves. The visitor was unaware that the laboratory's PPE policy applied to visiting researchers. When confronted by a lab manager, the researcher stated they were 'only making a quick observation' and had not intended to handle chemicals. However, they were observed actively pipetting with bare hands.",
+  "violations_identified": [
+    "Failure to wear lab coat in the laboratory (SOP-LAB-001 Section 1.1)",
+    "Failure to wear gloves when handling chemical solvents (SOP-LAB-001 Section 1.1)",
+    "Working with organic solvents without appropriate skin protection (SOP-CHEM-002 Section 1.2)"
+  ],
+  "root_cause": "Laboratory induction process did not cover visiting researchers. No PPE requirement communicated at laboratory entry point. Lab coat and gloves not provided or made accessible to visitors.",
+  "corrective_actions_taken": [
+    "Visitor induction protocol created: all visitors sign safety acknowledgement before entry",
+    "PPE station established at laboratory entrance with spare lab coats and gloves for visitors",
+    "Clear 'PPE REQUIRED BEYOND THIS POINT' signage installed at lab entrance",
+    "Lab manager checklist includes verifying visitor PPE compliance at start of visit"
+  ],
+  "outcome": "No injuries. Visitor was escorted out until PPE could be obtained. Incident reported to department safety committee.",
+  "lessons_learned": "PPE compliance policies must extend to ALL persons entering the lab, including visitors. Physical provision of PPE at entry points reduces barriers to compliance.",
+  "related_sop": "SOP-LAB-001",
+  "content": "Incident INC-2024-033: Visiting scholar working with DCM and acetone with no lab coat and no gloves. PPE policy not communicated to visitors. Active chemical handling observed without protection. Root cause: no visitor induction, no PPE at entry. Corrective actions: visitor protocol, PPE station at entrance, signage, manager checklist."
+}

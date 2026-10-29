@@ -1,0 +1,178 @@
+BIOLOGY & MICROBIOLOGY LABORATORY MANUAL
+Institution: Sample University — Department of Life Sciences
+Document: LAB-BIO-2024 | Version 2.4
+
+═══════════════════════════════════════════════════════════
+SECTION 1 — BIOSAFETY LEVELS AND GENERAL RULES
+═══════════════════════════════════════════════════════════
+
+1.1  This laboratory operates at Biosafety Level 2 (BSL-2).
+     Permitted organisms include: bacteria (non-pathogenic strains), cell cultures,
+     fungi, and viruses that are not classified as high-risk agents.
+
+1.2  General rules:
+     - No eating, drinking, smoking, or applying cosmetics in the laboratory.
+     - Mouth pipetting is absolutely prohibited — use mechanical pipette aids only.
+     - Hands must be washed with antimicrobial soap after every glove removal and
+       before leaving the laboratory, even if gloves were worn.
+     - Lab coats must be removed before leaving the laboratory area.
+     - Contaminated materials must never leave the laboratory without decontamination.
+
+1.3  Access: Only trained and authorised personnel may enter BSL-2 areas.
+     The laboratory door must remain closed during all work with biological materials.
+
+═══════════════════════════════════════════════════════════
+SECTION 2 — PERSONAL PROTECTIVE EQUIPMENT (PPE)
+═══════════════════════════════════════════════════════════
+
+2.1  MANDATORY PPE at all times in BSL-2 areas:
+     - Full-length laboratory coat (fastened at all times)
+     - Nitrile gloves — change gloves between different sample types
+     - Safety glasses or goggles when working with any liquid cultures or reagents
+
+2.2  ADDITIONAL PPE required for:
+     - Aerosolising procedures (vortexing, sonication, centrifugation of open tubes):
+       use a face shield or surgical mask in addition to goggles
+     - Working with human blood, tissue, or body fluids:
+       double nitrile gloves + face shield mandatory
+     - Cryogenic materials (liquid nitrogen):
+       cryogenic gloves + face shield
+
+2.3  PPE must NOT be worn outside the laboratory (corridors, offices, cafeteria).
+
+═══════════════════════════════════════════════════════════
+SECTION 3 — HANDLING BIOLOGICAL MATERIALS
+═══════════════════════════════════════════════════════════
+
+3.1  GENERAL HANDLING:
+     - All procedures likely to generate aerosols or droplets must be performed
+       inside a Class II Biological Safety Cabinet (BSC).
+     - Keep all biological material containers capped or covered when not in use.
+     - Never leave cultures unattended and open on the bench.
+
+3.2  BIOLOGICAL SAFETY CABINET (BSC) USE:
+     - Allow the BSC to run for 10 minutes before starting work.
+     - The BSC sash must be set to the operating height mark (approximately 20 cm).
+     - Do not block the front grille — maintain at least 15 cm clearance.
+     - Decontaminate the BSC interior with 70% ethanol before and after use.
+     - Never use a BSC with a damaged HEPA filter or broken UV light.
+
+3.3  PIPETTING:
+     - Use only mechanical pipette controllers — mouth pipetting is NEVER permitted.
+     - Use filter-tipped pipette tips when working with biological agents to prevent
+       aerosol contamination of the pipette barrel.
+     - Do not recap used pipette tips by hand — use one-hand technique or sharps bins.
+
+3.4  CENTRIFUGATION:
+     - Only sealed, aerosol-tight rotors and tubes may be used for biological material.
+     - Tubes must be balanced to within ±0.2 g before running.
+     - Inspect all tubes for cracks or leaks before loading.
+     - If a tube breaks during centrifugation: do not open for 10 minutes; notify
+       the supervisor; decontaminate the centrifuge with appropriate disinfectant.
+
+3.5  SHARPS:
+     - Used needles must NOT be recapped by hand.
+     - All sharps (needles, scalpel blades, broken glass) go directly into a rigid,
+       puncture-resistant yellow sharps container.
+     - Sharps containers must be closed and replaced when they reach the fill line.
+
+═══════════════════════════════════════════════════════════
+SECTION 4 — DECONTAMINATION AND STERILISATION
+═══════════════════════════════════════════════════════════
+
+4.1  ALL biological waste (cultures, contaminated consumables, pipette tips) must be
+     autoclaved or chemically decontaminated before disposal.
+
+4.2  AUTOCLAVE:
+     - Only trained and authorised personnel may operate the autoclave.
+     - Never autoclave sealed or tightly-capped containers — pressure explosion risk.
+     - Use autoclave bags and tape — do not overfill bags (≤ 75% capacity).
+     - Allow autoclave loads to cool before handling — use heat-resistant gloves.
+     - Log every autoclave cycle in the autoclave record book.
+
+4.3  CHEMICAL DECONTAMINATION:
+     - Standard disinfectant: 10% bleach (sodium hypochlorite) — 30 min contact time.
+     - Alternative: 70% ethanol for surface decontamination (bench, BSC).
+     - Liquid biological waste: add bleach to 10% final concentration, let stand 30 min,
+       then dispose to drain with large water flush.
+
+4.4  BENCH DECONTAMINATION:
+     - Decontaminate bench surfaces at the START and END of each session with 70% ethanol
+       or 1% Virkon solution.
+     - Immediately decontaminate any spills of biological material.
+
+═══════════════════════════════════════════════════════════
+SECTION 5 — STORAGE OF BIOLOGICAL MATERIALS
+═══════════════════════════════════════════════════════════
+
+5.1  Biological materials must be stored in dedicated, labelled containers:
+     - Label must include: material name, risk group, date, researcher name.
+     - Unlabelled biological material must be autoclaved and discarded.
+
+5.2  Storage temperatures:
+     - Live cultures and cell lines: 37°C incubator (CO₂ maintained at 5%).
+     - Short-term storage: 4°C refrigerator (biological materials refrigerator only —
+       no food or drinks in this refrigerator).
+     - Long-term storage: -80°C freezer (log all items in the freezer inventory).
+
+5.3  Infectious materials must never be stored in domestic or communal refrigerators.
+
+═══════════════════════════════════════════════════════════
+SECTION 6 — SPILLAGE AND ACCIDENT PROCEDURES
+═══════════════════════════════════════════════════════════
+
+6.1  BIOLOGICAL SPILL ON BENCH:
+     1. Alert others to avoid the area.
+     2. Cover the spill with paper towels.
+     3. Apply 10% bleach solution over the towels and surrounding area.
+     4. Leave for 20 minutes contact time.
+     5. Use paper towels to wipe up, working from outside to inside.
+     6. Dispose of all contaminated materials in an autoclave bag.
+     7. Decontaminate the area with 70% ethanol.
+     8. Report the incident to the supervisor.
+
+6.2  BIOLOGICAL SPILL ON PERSON:
+     - Remove contaminated clothing immediately.
+     - Wash affected skin with soap and water for minimum 15 minutes.
+     - Flush eyes at eyewash station for minimum 15 minutes if eye contact occurred.
+     - Report to the supervisor and occupational health immediately.
+
+6.3  NEEDLESTICK OR SHARPS INJURY:
+     1. Do NOT squeeze the wound.
+     2. Allow to bleed freely under running water for 2 minutes.
+     3. Wash with soap and water.
+     4. Cover with a waterproof dressing.
+     5. Report immediately to the supervisor and occupational health.
+     6. Document the incident (date, time, material involved, circumstances).
+
+6.4  CENTRIFUGE ACCIDENT (broken tube):
+     - Do not open the centrifuge for at least 10 minutes after it stops.
+     - Notify the supervisor before opening.
+     - Wear full PPE (gloves, goggles, mask) when investigating.
+     - Decontaminate all surfaces with 10% bleach.
+
+═══════════════════════════════════════════════════════════
+SECTION 7 — WASTE DISPOSAL
+═══════════════════════════════════════════════════════════
+
+7.1  Biological waste categories and disposal routes:
+     - Liquid biological waste: bleach-treated, then drain
+     - Solid biological waste (tips, tubes, gloves): autoclave bag → autoclave → clinical waste
+     - Sharps: yellow sharps container → clinical waste collection
+     - Non-contaminated waste: standard recycling or general waste
+
+7.2  Autoclave bags must be sealed before transport to the autoclave.
+7.3  Never place biological waste in general laboratory waste bins.
+
+═══════════════════════════════════════════════════════════
+SECTION 8 — END OF SESSION CHECKLIST
+═══════════════════════════════════════════════════════════
+
+8.1  Decontaminate bench and BSC with 70% ethanol.
+8.2  Dispose of all biological waste into appropriate autoclave bags or sharps containers.
+8.3  Return all cultures and reagents to appropriate storage (incubator, 4°C, -80°C).
+8.4  Remove gloves and wash hands thoroughly.
+8.5  Remove lab coat before leaving the laboratory.
+8.6  Ensure incubators are set to correct temperature.
+8.7  Close and lock the laboratory door.
+8.8  Report any incidents or near-misses to the supervisor before leaving.

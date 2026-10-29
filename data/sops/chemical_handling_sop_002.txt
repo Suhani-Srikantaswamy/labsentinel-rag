@@ -1,0 +1,88 @@
+LABORATORY SAFETY STANDARD OPERATING PROCEDURE
+Document ID: SOP-CHEM-002
+Title: Hazardous Chemical Handling, Storage, and Emergency Response
+Revision: 3.1 | Effective Date: 2024-03-01
+
+=============================================================================
+SECTION 1: CHEMICAL HAZARD CLASSIFICATION
+=============================================================================
+
+1.1 HAZARD CATEGORIES (GHS/OSHA aligned)
+  Class 1 — Explosives: Store in approved magazine; no open flame; grounding required.
+  Class 2 — Flammable gases: Store in ventilated area; away from oxidisers.
+  Class 3 — Flammable liquids: Approved cabinets; limit to minimum working quantity.
+  Class 4 — Flammable solids: Keep dry; isolate from ignition sources.
+  Class 5 — Oxidising substances: Store separate from flammables and organics.
+  Class 6 — Toxic substances: Fume hood required; double gloving; emergency antidote on hand.
+  Class 7 — Radioactive materials: Designated areas only; dosimetry required.
+  Class 8 — Corrosives: Acid/base cabinets; acid-resistant PPE; eyewash within 10 seconds.
+  Class 9 — Miscellaneous: Follow specific SDS requirements.
+
+1.2 MINIMUM REQUIRED PPE BY CLASS
+  Class 3 (Flammable liquids): Lab coat, nitrile gloves, safety goggles, no synthetic clothing
+  Class 6 (Toxic): Lab coat, double nitrile or appropriate gloves, splash goggles, fume hood
+  Class 8 (Corrosive): Acid-resistant apron, splash goggles, face shield for concentrations >1M
+
+=============================================================================
+SECTION 2: TRANSPORTING CHEMICALS WITHIN THE BUILDING
+=============================================================================
+
+2.1 REQUIREMENTS
+  - Use a chemical transport cart with secondary containment tray for quantities > 500 mL.
+  - Never carry bottles of corrosive or flammable liquids by their necks alone — use a bottle carrier.
+  - Do not transport incompatible chemicals simultaneously without physical separation.
+  - Elevator use: Use freight elevator; announce presence; secure load.
+
+2.2 PROHIBITED ACTIONS DURING TRANSPORT
+  - Running or walking rapidly with chemicals
+  - Using personal mobile devices during transport
+  - Leaving chemicals unattended in corridors
+
+=============================================================================
+SECTION 3: SPECIFIC HIGH-HAZARD CHEMICAL PROTOCOLS
+=============================================================================
+
+3.1 HYDROFLUORIC ACID (HF)
+EXTREME HAZARD — Causes deep tissue damage and systemic fluoride toxicity.
+  - TWO trained personnel must be present at all times.
+  - Calcium gluconate antidote gel MUST be on the bench before work begins.
+  - Neoprene or heavy nitrile gloves (double layered), face shield, and chemical-resistant apron required.
+  - Work only in a certified HF fume hood.
+  - Emergency: Apply calcium gluconate gel to affected area IMMEDIATELY; call 911.
+
+3.2 PERCHLORIC ACID
+  - Use only in designated perchloric acid fume hoods with wash-down capability.
+  - Never heat above 70°C — risk of explosive perchlorate formation.
+  - Do not allow contact with organic materials.
+
+3.3 PYROPHORIC MATERIALS (e.g., n-BuLi, DIBAL-H)
+  - Handle only under inert atmosphere (glove box or Schlenk line).
+  - Have dry sand or dry chemical extinguisher nearby — NEVER use water.
+  - Only trained personnel with documented experience may work with pyrophorics.
+
+=============================================================================
+SECTION 4: CHEMICAL INCOMPATIBILITY REFERENCE
+=============================================================================
+
+  NEVER mix or store together:
+  | Chemical A            | Chemical B               | Hazard              |
+  |-----------------------|--------------------------|---------------------|
+  | Concentrated acids    | Bases / ammonium salts   | Violent reaction    |
+  | Oxidisers (KMnO4)     | Organics / flammables    | Fire / explosion    |
+  | Bleach (NaOCl)        | Ammonia / amines         | Toxic chloramines   |
+  | Bleach (NaOCl)        | Acids (HCl)              | Chlorine gas        |
+  | Hydrogen peroxide     | Organics / flammables    | Explosion risk      |
+  | Flammables            | Open flames / sparks     | Fire / explosion    |
+
+=============================================================================
+SECTION 5: SAFETY DATA SHEET (SDS) REQUIREMENTS
+=============================================================================
+
+  - SDS must be reviewed BEFORE first use of any new chemical.
+  - SDS binder must be present in the laboratory and up-to-date.
+  - Electronic SDS access must be available at each workstation.
+  - Key SDS sections to review: Section 2 (Hazards), Section 4 (First Aid),
+    Section 7 (Handling), Section 8 (PPE), Section 10 (Reactivity).
+
+Document Owner: Chemical Safety Subcommittee
+Next Review Date: 2025-03-01
