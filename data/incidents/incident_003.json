@@ -1,0 +1,25 @@
+{
+  "incident_id": "INC-2024-011",
+  "title": "Centrifuge Imbalance Incident — Rotor Damage and Sample Loss",
+  "date": "2024-02-03",
+  "location": "Molecular Biology Lab, Room 124",
+  "severity": "medium",
+  "personnel_involved": "Undergraduate research assistant",
+  "description": "An undergraduate research assistant loaded a centrifuge with an odd number of samples (5 tubes in a 6-position rotor) without adding a balance tube. The centrifuge was started at 12,000 RPM. After approximately 30 seconds, strong vibration was detected and the machine automatically shut down due to imbalance detection. Inspection revealed micro-fractures in one tube and rotor scoring. All samples were lost. Approximately $800 in reagents destroyed.",
+  "violations_identified": [
+    "Centrifuge loaded with unbalanced samples (MAN-CENT-001 Section 2.2 and 2.3)",
+    "Odd number of samples loaded without counterbalance tube (MAN-CENT-001 Section 2.3)",
+    "Cracked tube not identified in pre-run inspection (MAN-CENT-001 Section 1.1)"
+  ],
+  "root_cause": "Undergraduate had not completed centrifuge safety training. Was shown 'how to use the machine' by a peer but did not receive formal training on balancing requirements. Training records were not checked before laboratory access was granted.",
+  "corrective_actions_taken": [
+    "Mandatory centrifuge certification training before any independent centrifuge use",
+    "Training log now checked before granting laboratory access to new members",
+    "Quick-reference balance guide laminated and placed on centrifuge",
+    "Balance verification step added to lab onboarding checklist"
+  ],
+  "outcome": "No injuries. Rotor sent for professional inspection — light scoring, approved for continued use. Samples lost — experiment delayed 2 weeks.",
+  "lessons_learned": "Informal peer training is insufficient for equipment operation. All equipment users must complete formal documented training. Centrifuge imbalance is a serious safety issue that can cause catastrophic rotor failure at high speeds.",
+  "related_sop": "MAN-CENT-001",
+  "content": "Incident INC-2024-011: Centrifuge loaded with 5 unbalanced tubes, no balance tube added. Run at 12,000 RPM. Automatic shutdown due to imbalance. Rotor damage and sample loss. Undergraduate had not completed formal centrifuge training. Root cause: informal peer training, no training verification. Corrective actions: mandatory certification, training log checks, balance guide posted."
+}

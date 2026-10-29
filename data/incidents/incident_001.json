@@ -1,0 +1,25 @@
+{
+  "incident_id": "INC-2023-047",
+  "title": "Chemical Burn from Hydrochloric Acid — Failure to Use Splash Goggles",
+  "date": "2023-09-12",
+  "location": "Chemistry Building Room 214, Bench 3",
+  "severity": "high",
+  "personnel_involved": "Graduate researcher (2nd year)",
+  "description": "A graduate researcher was performing dilution of concentrated hydrochloric acid (37% HCl) without wearing chemical splash goggles. Only safety glasses were worn. During pouring, a small splash occurred, resulting in acid contact with the left eye. The researcher did not immediately go to the eyewash station, delaying decontamination by approximately 3 minutes. The incident resulted in corneal irritation requiring medical treatment.",
+  "violations_identified": [
+    "Failure to wear chemical splash goggles when handling liquid acids (SOP-LAB-001 Section 1.3)",
+    "Failure to immediately use eyewash station following chemical eye contact (SOP-LAB-001 Section 4.3)",
+    "Work performed without direct supervision despite researcher being <6 months experience with concentrated acids"
+  ],
+  "root_cause": "Inadequate PPE selection — researcher incorrectly believed safety glasses provided sufficient eye protection for acid work. No immediate supervisor present to verify PPE compliance before work began.",
+  "corrective_actions_taken": [
+    "Mandatory PPE re-training for all graduate researchers",
+    "PPE checkpoint protocol implemented: supervisor must verify PPE before any concentrated acid work",
+    "Eyewash station response drills conducted monthly",
+    "New signage installed at all acid storage and work areas"
+  ],
+  "outcome": "Researcher recovered fully after 2 weeks. No permanent vision damage. Laboratory access suspended for 1 month pending retraining.",
+  "lessons_learned": "Safety glasses are NOT equivalent to splash goggles for liquid chemical work. The 10-second rule for eyewash response is critical — delays cause significantly worse outcomes.",
+  "related_sop": "SOP-LAB-001",
+  "content": "Incident INC-2023-047: Chemical burn from concentrated HCl. Graduate researcher failed to wear splash goggles. Acid contact with left eye. Delayed eyewash response (3 minutes instead of immediate). Corneal irritation, medical treatment required. Root cause: inadequate PPE selection, no supervisor verification. Corrective actions: PPE retraining, checkpoint protocol, monthly eyewash drills."
+}

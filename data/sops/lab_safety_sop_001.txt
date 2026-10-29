@@ -1,0 +1,138 @@
+LABORATORY SAFETY STANDARD OPERATING PROCEDURE
+Document ID: SOP-LAB-001
+Title: General Laboratory Safety Rules and Personal Protective Equipment (PPE) Requirements
+Revision: 4.2 | Effective Date: 2024-01-15
+
+=============================================================================
+SECTION 1: PERSONAL PROTECTIVE EQUIPMENT (PPE)
+=============================================================================
+
+1.1 MANDATORY PPE IN ALL LABORATORY AREAS
+All personnel entering the laboratory MUST wear the following at all times:
+  - Safety goggles (ANSI Z87.1 rated) or chemical splash goggles when handling liquids
+  - Lab coat (cotton or flame-resistant material) — fully buttoned, covering arms to wrist
+  - Closed-toe shoes with no exposed skin on feet
+  - Gloves appropriate to the hazard class of chemicals being used
+
+Violation of PPE requirements is a Level 3 Safety Infraction subject to immediate removal
+from the laboratory and disciplinary action.
+
+1.2 GLOVE SELECTION GUIDE
+  - Nitrile (blue/purple): Suitable for most common lab chemicals, acids, bases
+  - Neoprene (green): Chlorinated solvents, phenol, strong acids
+  - Latex: General purpose only — check for allergies before use
+  - Thick rubber: Cryogenic materials, concentrated acids
+
+1.3 EYE PROTECTION
+Safety glasses provide impact protection only. Chemical splash goggles MUST be worn when:
+  - Opening, pouring, or transferring any liquid chemical
+  - Working with pressurised systems
+  - Performing centrifugation
+  - Handling glassware under vacuum or pressure
+
+=============================================================================
+SECTION 2: CHEMICAL HANDLING AND STORAGE
+=============================================================================
+
+2.1 GENERAL CHEMICAL HANDLING RULES
+  a. Never pipette by mouth.
+  b. Label all containers immediately upon preparation.
+  c. Use secondary containment for all liquids exceeding 1 litre.
+  d. Do not use damaged glassware — inspect before each use.
+  e. Never work alone with highly toxic or explosive materials.
+
+2.2 FLAMMABLE AND COMBUSTIBLE MATERIALS
+  - Store flammable liquids ONLY in approved flammable storage cabinets.
+  - Quantities outside the cabinet must not exceed 10 litres per bench area.
+  - No open flames within 3 metres of flammable liquid storage or use.
+  - Use spark-free equipment and explosion-proof refrigerators for flammable storage.
+
+2.3 ACID AND BASE HANDLING
+  - Always add acid TO water, never water to acid (exothermic reaction risk).
+  - Store acids and bases in separate, dedicated cabinets.
+  - Perform dilutions in a fume hood when working with concentrated acids.
+  - Have neutralising agent (sodium bicarbonate for acids, boric acid for bases) readily accessible.
+
+=============================================================================
+SECTION 3: FUME HOOD OPERATION
+=============================================================================
+
+3.1 REQUIRED FUME HOOD USE
+The following operations MUST be performed inside a functioning fume hood:
+  - Use of volatile organic solvents (acetone, ethanol > 10%, methanol, ether)
+  - Preparation or use of concentrated acids (HCl, H2SO4, HNO3, HF)
+  - Any procedure generating aerosols, dusts, or toxic vapours
+  - Heating reactions that may produce vapours
+
+3.2 FUME HOOD OPERATING PROCEDURE
+  a. Verify the fume hood airflow indicator is active (green light or bead chain moving) BEFORE starting work.
+  b. Position the sash at or below the marked working height line (typically 45 cm).
+  c. Keep all materials at least 15 cm behind the sash plane.
+  d. Do not store materials permanently in the fume hood — this obstructs airflow.
+  e. Report non-functioning fume hoods to the Safety Officer IMMEDIATELY — do not use.
+
+3.3 FUME HOOD FAILURE PROTOCOL
+If a fume hood alarm sounds or airflow fails during use:
+  1. Stop work immediately
+  2. Close all open containers
+  3. Leave the sash in the lowered position
+  4. Evacuate the immediate area if vapours are present
+  5. Call the Safety Officer: Ext. 4-SAFE (4-7233)
+
+=============================================================================
+SECTION 4: EMERGENCY PROCEDURES
+=============================================================================
+
+4.1 CHEMICAL SPILL RESPONSE
+  Minor spill (< 1 litre, non-toxic, non-volatile):
+    1. Alert others in the area
+    2. Don appropriate PPE
+    3. Use spill kit to absorb and neutralise
+    4. Dispose of waste in appropriate container
+    5. Complete an incident report within 24 hours
+
+  Major spill or toxic/flammable material:
+    1. Evacuate the laboratory immediately
+    2. Pull fire alarm if fire risk is present
+    3. Call Emergency Services: 911
+    4. Call Campus Safety: Ext. 4-SAFE
+    5. Do NOT re-enter until cleared by hazmat team
+
+4.2 FIRE RESPONSE
+  - Know the location of the nearest fire extinguisher before starting work.
+  - For small, contained fires (trash can, small bench fire): Use PASS technique with CO2 extinguisher.
+  - For large fires or fires involving chemicals: Activate alarm, evacuate immediately, call 911.
+  - Never use water on chemical or electrical fires.
+
+4.3 INJURY RESPONSE
+  - Eye exposure: Irrigate immediately at eyewash station for minimum 15 minutes.
+  - Skin exposure: Wash with soap and water for minimum 15 minutes; remove contaminated clothing.
+  - Inhalation: Move to fresh air; call 911 if symptoms persist.
+  - Cuts or punctures: Apply pressure, seek medical attention immediately for any chemically-contaminated wound.
+
+=============================================================================
+SECTION 5: WASTE DISPOSAL
+=============================================================================
+
+5.1 CHEMICAL WASTE
+  - Do not pour chemicals down the drain unless explicitly approved by the Safety Officer.
+  - Label all waste containers with: contents, concentration, date, generator name.
+  - Segregate by hazard class: flammables, halogenated solvents, acids, bases, heavy metals.
+  - Contact EH&S for pickup when containers reach 75% capacity.
+
+5.2 BIOLOGICAL AND SHARPS WASTE
+  - Dispose of sharps (needles, broken glass, pipette tips) in puncture-resistant sharps containers ONLY.
+  - Biological waste must be autoclaved before disposal or placed in biohazard bags for incineration.
+  - Do NOT recap needles.
+
+=============================================================================
+ACKNOWLEDGEMENT
+=============================================================================
+All laboratory personnel must read, understand, and sign the acknowledgement form
+(Form SOP-ACK-001) before beginning work in this laboratory.
+
+Non-compliance with this SOP may result in disciplinary action up to and including
+suspension of laboratory privileges.
+
+Document Owner: Laboratory Safety Committee
+Next Review Date: 2025-01-15

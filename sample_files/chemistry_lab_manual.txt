@@ -1,0 +1,189 @@
+CHEMISTRY LABORATORY MANUAL
+Institution: Sample University — Department of Chemistry
+Document: LAB-CHEM-2024 | Version 3.1
+
+═══════════════════════════════════════════════════════════
+SECTION 1 — GENERAL LABORATORY RULES
+═══════════════════════════════════════════════════════════
+
+1.1  No food, drink, or chewing gum is permitted in the laboratory at any time.
+1.2  Long hair must be tied back before entering the lab.
+1.3  Closed-toe shoes must be worn — sandals, flip-flops, or bare feet are prohibited.
+1.4  Never work alone. A second person must be present when using hazardous chemicals.
+1.5  Mobile phone use during active experiments is prohibited.
+1.6  Running inside the laboratory is strictly forbidden.
+1.7  All spills, accidents, near-misses, and injuries must be reported to the supervisor
+     immediately, regardless of how minor they appear.
+1.8  Unauthorised persons must not enter the laboratory without prior approval.
+
+═══════════════════════════════════════════════════════════
+SECTION 2 — PERSONAL PROTECTIVE EQUIPMENT (PPE)
+═══════════════════════════════════════════════════════════
+
+2.1  MANDATORY PPE at all times in the laboratory:
+     - Laboratory coat (cotton or fire-resistant, fully fastened)
+     - Safety glasses or chemical splash goggles
+     - Nitrile gloves (latex-free) when handling any chemical
+
+2.2  CHEMICAL SPLASH GOGGLES (not just safety glasses) are required when:
+     - Pouring, transferring, or measuring any liquid chemical
+     - Opening concentrated acid or base containers
+     - Performing any reaction that may generate splashes or vapours
+
+2.3  DOUBLE GLOVING is required when handling:
+     - Concentrated acids (HCl >10%, H₂SO₄, HNO₃, HF)
+     - Concentrated bases (NaOH >2M, KOH)
+     - Acutely toxic substances (cyanides, mercury compounds)
+
+2.4  Gloves must be removed before:
+     - Touching door handles, keyboards, or shared surfaces
+     - Leaving the laboratory area
+
+2.5  A face shield (in addition to goggles) is required when:
+     - Working with HF (hydrofluoric acid) at any concentration
+     - Handling cryogenic liquids (liquid nitrogen, dry ice)
+     - Performing high-pressure reactions
+
+═══════════════════════════════════════════════════════════
+SECTION 3 — CHEMICAL HANDLING
+═══════════════════════════════════════════════════════════
+
+3.1  Read the Safety Data Sheet (SDS) for every chemical before use.
+     SDS binders are located at the main lab entrance and the supervisor's office.
+
+3.2  ACID HANDLING:
+     - Always add acid TO water, never water to acid (exothermic reaction risk).
+     - Concentrated acids must only be used inside a functioning fume hood.
+     - Acid dilution must be performed in a heat-resistant borosilicate beaker.
+     - Neutralising agent (sodium bicarbonate) must be within reach before starting.
+
+3.3  FLAMMABLE SOLVENTS:
+     - Keep only the minimum working quantity on the bench (max 500 mL).
+     - Flammable solvents must be stored in approved flammable-liquid cabinets.
+     - No open flames within 3 metres of any flammable solvent.
+     - Use only spark-proof equipment (stirrers, hotplates) near flammables.
+
+3.4  UNLABELLED CONTAINERS:
+     - Never use chemicals from an unlabelled container.
+     - All containers, including temporary ones, must be labelled with:
+       chemical name, concentration, date prepared, preparer's name.
+
+3.5  CHEMICAL INCOMPATIBILITIES:
+     - Oxidisers (KMnO₄, H₂O₂, HNO₃) must never be stored with flammables.
+     - Bleach (NaOCl) must never be mixed with ammonia, amines, or acids.
+     - Strong acids and strong bases must be stored in separate cabinets.
+
+═══════════════════════════════════════════════════════════
+SECTION 4 — FUME HOOD OPERATION
+═══════════════════════════════════════════════════════════
+
+4.1  The following activities MUST be performed inside a functioning fume hood:
+     - All work with volatile organic solvents (acetone, DCM, methanol, ether, THF)
+     - Preparation or use of concentrated acids or bases
+     - Any procedure that generates aerosols, fumes, dust, or toxic vapours
+     - Heating reactions involving hazardous chemicals
+
+4.2  Before beginning work in the fume hood:
+     - Verify the airflow indicator is active (green light ON, or bead chain moving).
+     - Lower the sash to the working height line (marked with a yellow sticker ≈ 45 cm).
+     - Never work with the sash fully raised.
+
+4.3  The sash must remain at or below the working height mark during ALL fume hood work.
+     A fully raised sash provides NO protection.
+
+4.4  If the fume hood alarm sounds:
+     1. Stop work immediately.
+     2. Close all containers.
+     3. Lower the sash fully.
+     4. Evacuate the immediate area.
+     5. Call the safety officer: Ext. 4-SAFE.
+
+4.5  Do not use a fume hood for storage — cluttered hoods restrict airflow.
+
+═══════════════════════════════════════════════════════════
+SECTION 5 — EQUIPMENT SAFETY
+═══════════════════════════════════════════════════════════
+
+5.1  CENTRIFUGE:
+     - Always balance opposing sample positions before starting (weight within ±0.1 g).
+     - For odd sample numbers, use a water-filled balance tube of equal weight.
+     - Never exceed the rated maximum RPM for the rotor in use.
+     - Never open the lid until the rotor has come to a complete stop (0 RPM).
+     - Inspect rotor and tubes for cracks before every use.
+
+5.2  HOTPLATE / STIRRER:
+     - Never leave heating reactions unattended.
+     - Use a clamp and ring stand — never hold hot glassware by hand.
+     - Always check that hotplates are off before leaving the bench.
+
+5.3  GLASSWARE:
+     - Inspect glassware for cracks or chips before every use.
+     - Dispose of broken glassware immediately in the designated sharps/glass bin.
+     - Never use cracked or chipped glassware — it fails under thermal or pressure stress.
+
+5.4  AUTOCLAVE / PRESSURE VESSELS:
+     - Only trained, certified personnel may operate autoclave equipment.
+     - Never autoclave sealed containers — pressure build-up causes explosion.
+
+═══════════════════════════════════════════════════════════
+SECTION 6 — FIRE AND EMERGENCY PROCEDURES
+═══════════════════════════════════════════════════════════
+
+6.1  In the event of a fire:
+     - For small, contained fires: use the nearest CO₂ extinguisher (PASS technique).
+     - For any large fire or fire involving chemicals: activate the alarm, evacuate
+       immediately, and call 999 / 911. Do not attempt to fight a large fire.
+     - Never use water on chemical or electrical fires.
+
+6.2  CHEMICAL SPILL — small (< 1 L, non-toxic):
+     1. Alert others nearby.
+     2. Don PPE (goggles, gloves, lab coat).
+     3. Use the spill kit to absorb and neutralise.
+     4. Dispose of waste in the appropriate labelled container.
+     5. Complete an incident report form within 24 hours.
+
+6.3  CHEMICAL SPILL — large or toxic/flammable:
+     1. Evacuate the laboratory immediately.
+     2. Close the door (do not lock).
+     3. Activate the fire alarm if fire risk is present.
+     4. Call Emergency Services and the Safety Officer.
+     5. Do not re-enter until cleared by the Hazmat team.
+
+6.4  EYE EXPOSURE to chemicals:
+     - Go to the nearest eyewash station immediately.
+     - Flush continuously for a minimum of 15 minutes.
+     - Keep eyelids open during flushing.
+     - Seek medical attention after flushing.
+
+6.5  SKIN EXPOSURE:
+     - Remove contaminated clothing immediately.
+     - Wash affected area with soap and water for minimum 15 minutes.
+     - Seek medical attention for any acid, base, or toxic substance exposure.
+
+═══════════════════════════════════════════════════════════
+SECTION 7 — WASTE DISPOSAL
+═══════════════════════════════════════════════════════════
+
+7.1  Never pour chemicals down the sink unless explicitly approved by the supervisor.
+
+7.2  Segregate waste by hazard class:
+     - Halogenated solvents (DCM, chloroform) — red labelled containers
+     - Non-halogenated solvents (ethanol, acetone) — yellow labelled containers
+     - Aqueous acid/base — neutralise to pH 6–8, then pour to drain with large water flush
+     - Heavy metals — dedicated heavy-metal waste container
+
+7.3  Sharps (broken glass, needles, blades) — puncture-resistant sharps container only.
+     Do not place sharps in regular waste bins.
+
+7.4  Notify the safety officer when any waste container reaches 75% full.
+
+═══════════════════════════════════════════════════════════
+SECTION 8 — HOUSEKEEPING AND END OF SESSION
+═══════════════════════════════════════════════════════════
+
+8.1  Clean and dry the bench before leaving the laboratory.
+8.2  Return all chemicals to their designated storage locations.
+8.3  Ensure all hotplates, stirrers, and other electrical equipment are switched off.
+8.4  Wash hands thoroughly with soap and water before leaving.
+8.5  The last person to leave must verify: all gas taps closed, all electrical equipment
+     off, fume hood sashes lowered, windows closed, laboratory door locked.
