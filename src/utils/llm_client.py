@@ -119,13 +119,24 @@ class OpenAIClient:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_gemini_keys() -> list[str]:
-    """Load GOOGLE_API_KEY, GOOGLE_API_KEY_2, ... from environment."""
+    """
+    Load all Gemini API keys from environment.
+    Supports unlimited keys: GOOGLE_API_KEY, GOOGLE_API_KEY_2, GOOGLE_API_KEY_3, ...
+    Stops scanning when it finds a gap (no key at position N means done).
+    """
     keys = []
+    # Primary key
     k = os.getenv("GOOGLE_API_KEY", "").strip()
-    if k: keys.append(k)
-    for i in range(2, 10):
+    if k:
+        keys.append(k)
+    # Additional keys — scan until gap
+    for i in range(2, 1000):
         k = os.getenv(f"GOOGLE_API_KEY_{i}", "").strip()
-        if k: keys.append(k)
+        if k:
+            keys.append(k)
+        else:
+            break   # stop at first gap — no need to scan further
+    return keys
     return keys
 
 
