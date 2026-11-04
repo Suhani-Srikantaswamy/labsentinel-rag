@@ -16,6 +16,12 @@ from loguru import logger
 
 from config.settings import settings, OUTPUT_DIR
 from src.utils.models import InvestigationReport, Violation
+from src.utils.time_utils import format_human_time
+
+
+def _fmt_ts(seconds: float) -> str:
+    """Backwards-compatible timestamp formatter for report HTML and UI output."""
+    return format_human_time(seconds)
 
 
 class ReportGenerator:
@@ -68,16 +74,20 @@ class ReportGenerator:
         }
         risk_color = risk_colors.get(report.overall_risk_level, "#7f8c8d")
 
-        # Timeline rows
+        # Timeline rows — VIOLATIONS ONLY (not every event)
         timeline_rows = ""
-        for e in report.timeline:
+        violation_events = [e for e in report.timeline if e.potential_violation]
+        if not violation_events:
+            timeline_rows = '<tr><td colspan="4" style="padding:12px;text-align:center;color:#64748b;font-style:italic">No violations detected in timeline</td></tr>'
+        for e in violation_events:
             badge_color = risk_colors.get(e.severity, "#475569")
-            viol_flag   = " ⚠️" if e.potential_violation else ""
             objects_str = ", ".join(e.objects_involved[:4]) if e.objects_involved else "—"
+            # Show the violation hint if available
+            desc = e.description
             timeline_rows += f"""
             <tr>
-              <td style="white-space:nowrap;color:#60a5fa;font-weight:600">{e.timestamp_sec:.1f}s</td>
-              <td>{e.description}{viol_flag}</td>
+              <td style="white-space:nowrap;color:#FF7A59;font-weight:700;font-family:monospace">{_fmt_ts(e.timestamp_sec)}</td>
+              <td>{desc}</td>
               <td style="color:#64748b;font-size:0.85em">{objects_str}</td>
               <td><span class="badge" style="background:{badge_color}">{e.severity.upper()}</span></td>
             </tr>"""
@@ -107,7 +117,7 @@ class ReportGenerator:
               <div class="v-header">
                 <span class="badge" style="background:{badge_color}">{v.severity.upper()}</span>
                 <h3>{v.violation_type}</h3>
-                <span class="v-timestamp">⏱ {v.event.timestamp_sec:.1f}s</span>
+                <span class="v-timestamp">⏱ {_fmt_ts(v.event.timestamp_sec)}</span>
               </div>
               <div class="rule-box">📋 <strong>Rule Violated:</strong> {v.rule_violated}</div>
               <p class="explanation">{v.explanation}</p>
@@ -240,7 +250,7 @@ class ReportGenerator:
 <div class="header">
   <h1>🔬 LabSentinel-RAG</h1>
   <p>Multimodal Evidence-Grounded Laboratory Incident Investigation Report &nbsp;·&nbsp;
-     Report ID: {report.report_id[:16]}… &nbsp;·&nbsp;
+     Report ID: {report.report_id} &nbsp;·&nbsp;
      {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}</p>
 </div>
 
@@ -263,9 +273,9 @@ class ReportGenerator:
 <h2>Immediate Actions Required</h2>
 <ul>{"".join(f"<li>{a}</li>" for a in report.immediate_actions_required) or "<li>Review violation details and implement corrective actions.</li>"}</ul>
 
-<h2>Incident Timeline</h2>
+<h2>Violation Timeline ({len(violation_events)} events)</h2>
 <table>
-  <thead><tr><th>Time</th><th>Description</th><th>Objects / Materials</th><th>Severity</th></tr></thead>
+  <thead><tr><th>Timestamp</th><th>Observation</th><th>Objects / Materials</th><th>Severity</th></tr></thead>
   <tbody>{timeline_rows}</tbody>
 </table>
 
@@ -359,7 +369,7 @@ class ReportGenerator:
         # Violations
         story.append(Paragraph(f"Confirmed Violations ({report.total_violations})", h2_style))
         for i, v in enumerate(report.violations, 1):
-            story.append(Paragraph(f"{i}. [{v.severity.upper()}] {v.violation_type} @ {v.event.timestamp_sec:.1f}s", h3_style))
+            story.append(Paragraph(f"{i}. [{v.severity.upper()}] {v.violation_type} @ {_fmt_ts(v.event.timestamp_sec)}", h3_style))
             story.append(Paragraph(f"<b>Rule Violated:</b> {v.rule_violated}", body_style))
             story.append(Paragraph(f"<b>Explanation:</b> {v.explanation}", body_style))
             story.append(Paragraph(f"<b>Immediate Action:</b> {v.immediate_action}", body_style))

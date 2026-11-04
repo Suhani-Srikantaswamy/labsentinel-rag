@@ -72,19 +72,17 @@ class LLMConfig(BaseModel):
 
 # ── Video Analysis Settings ───────────────────────────────────────────────────
 class VideoConfig(BaseModel):
-    # Sample 1 frame every N seconds (lower = more thorough, higher API cost)
-    # Default 3s gives good coverage without excessive cost
+    # Lower sampling and caps keep 3–4 minute videos responsive without losing the major violations.
     frame_sample_rate: int = Field(
-        default_factory=lambda: int(os.getenv("LABSENTINEL_FRAME_RATE", "3"))
+        default_factory=lambda: int(os.getenv("LABSENTINEL_FRAME_RATE", "6"))
     )
-    # Hard cap on frames per video — raised to 60 for better accuracy
-    # For a 90s video at 3s intervals = 30 frames naturally; cap of 60 gives room for motion detection extras
+    # Keep the frame budget tight enough for a 3–4 minute incident to finish in under a few minutes.
     max_frames: int = Field(
-        default_factory=lambda: int(os.getenv("LABSENTINEL_MAX_FRAMES", "60"))
+        default_factory=lambda: int(os.getenv("LABSENTINEL_MAX_FRAMES", "24"))
     )
-    # For long videos: process N seconds at a time (300 = 5 min chunks)
+    # Process long videos in shorter chunks for better throughput and easier boundary handling.
     chunk_duration_sec: int = Field(
-        default_factory=lambda: int(os.getenv("LABSENTINEL_CHUNK_SEC", "300"))
+        default_factory=lambda: int(os.getenv("LABSENTINEL_CHUNK_SEC", "180"))
     )
     # Resize frames before sending to API (saves tokens)
     resize_width: int = int(os.getenv("LABSENTINEL_FRAME_WIDTH", "1280"))

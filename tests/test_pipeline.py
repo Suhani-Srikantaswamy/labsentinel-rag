@@ -176,6 +176,12 @@ class TestDocumentLoader:
 # ── Report Generator Tests ────────────────────────────────────────────────────
 
 class TestReportGenerator:
+    def test_human_readable_timestamps(self):
+        from src.utils.time_utils import format_human_time
+        assert format_human_time(0) == "00:00"
+        assert format_human_time(12.5) == "00:12"
+        assert format_human_time(3661) == "1:01:01"
+
     def test_json_output(self, report, tmp_path):
         from src.report.report_generator import ReportGenerator
         gen  = ReportGenerator(output_dir=str(tmp_path))
@@ -248,3 +254,104 @@ class TestJsonParser:
 
     def test_empty_string(self):
         assert self._parse("") == {}
+
+
+class TestFalsePositiveGuardrails:
+    def test_uncertain_ppe_is_not_promoted_to_violation(self):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+
+        data = {
+            "description": "No clear evidence of lab work in this frame.",
+            "people_count": 0,
+            "objects_involved": [],
+            "actions_observed": [],
+            "ppe_status": {
+                "lab_coat": "missing",
+                "gloves": "missing",
+                "eye_protection": "missing",
+                "closed_toe_shoes": "cannot_determine",
+            },
+            "checklist_findings": ["No PPE visible"],
+            "potential_violation": True,
+            "violation_hint": "No PPE visible",
+            "severity": "medium",
+            "confidence": 0.58,
+        }
+
+        cleaned = _sanitize_frame_result(data)
+        assert cleaned["potential_violation"] is False
+        assert cleaned["severity"] == "none"
+
+    def test_direct_ppe_observation_still_counts(self):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+
+        data = {
+            "description": "Researcher is handling chemicals without safety goggles.",
+            "people_count": 1,
+            "objects_involved": ["beaker", "chemical bottle"],
+            "actions_observed": ["pouring liquid"],
+            "ppe_status": {
+                "lab_coat": "worn",
+                "gloves": "worn",
+                "eye_protection": "missing",
+                "closed_toe_shoes": "worn",
+            },
+            "checklist_findings": ["Researcher missing eye protection while pouring liquid"],
+            "potential_violation": True,
+            "violation_hint": "Missing goggles while pouring chemical",
+            "severity": "medium",
+            "confidence": 0.87,
+        }
+
+        cleaned = _sanitize_frame_result(data)
+        assert cleaned["potential_violation"] is True
+        assert cleaned["severity"] in {"medium", "high"}
+
+    def test_clear_equipment_violation_is_not_rejected(self):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+
+        data = {
+            "description": "Centrifuge lid is open while rotor is running.",
+            "people_count": 0,
+            "objects_involved": ["centrifuge", "rotor", "sample tubes"],
+            "actions_observed": ["centrifuge running"],
+            "ppe_status": {
+                "lab_coat": "cannot_determine",
+                "gloves": "cannot_determine",
+                "eye_protection": "cannot_determine",
+                "closed_toe_shoes": "cannot_determine",
+            },
+            "checklist_findings": ["Centrifuge lid open while in operation"],
+            "potential_violation": True,
+            "violation_hint": "Centrifuge lid open while running",
+            "severity": "high",
+            "confidence": 0.91,
+        }
+
+        cleaned = _sanitize_frame_result(data)
+        assert cleaned["potential_violation"] is True
+        assert cleaned["severity"] == "high"
+
+
+class TestDetectionQuality:
+    def test_collapse_adjacent_duplicate_events(self):
+        from src.vlm.video_analyzer import _collapse_adjacent_events
+
+        events = [
+            DetectedEvent(event_id="1", timestamp_sec=12.0, frame_index=1, description="Researcher without goggles", objects_involved=["goggles"], actions_observed=["pouring"], potential_violation=True, severity="medium", confidence=0.82),
+            DetectedEvent(event_id="2", timestamp_sec=13.0, frame_index=2, description="Researcher without goggles", objects_involved=["goggles"], actions_observed=["pouring"], potential_violation=True, severity="medium", confidence=0.84),
+            DetectedEvent(event_id="3", timestamp_sec=25.0, frame_index=3, description="Researcher wearing goggles again", objects_involved=["goggles"], actions_observed=["standing"], potential_violation=False, severity="none", confidence=0.5),
+            DetectedEvent(event_id="4", timestamp_sec=30.0, frame_index=4, description="Researcher without goggles", objects_involved=["goggles"], actions_observed=["pouring"], potential_violation=True, severity="medium", confidence=0.81),
+        ]
+
+        collapsed = _collapse_adjacent_events(events)
+        assert len(collapsed) == 2
+        assert collapsed[0].timestamp_sec == 12.0
+        assert collapsed[1].timestamp_sec == 30.0
+
+    def test_normalize_manual_files_handles_single_and_nested_lists(self):
+        from app import _normalize_manual_files
+
+        files = [["/tmp/a.txt"], "/tmp/b.txt", None, ["/tmp/c.txt"]]
+        normalized = _normalize_manual_files(files)
+        assert normalized == ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"]

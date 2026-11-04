@@ -20,6 +20,7 @@ from config.settings import settings
 from src.utils.models import DetectedEvent, VideoAnalysisResult
 from src.utils.json_utils import parse_llm_json
 from src.utils.llm_client import get_client
+from src.utils.time_utils import format_human_time
 from .video_chunker import extract_frames_chunked, get_video_info
 
 
@@ -28,65 +29,65 @@ from .video_chunker import extract_frames_chunked, get_video_info
 # describe what it sees. This dramatically reduces missed violations.
 
 FRAME_PROMPT = """\
-You are a trained laboratory safety auditor reviewing CCTV footage.
-Your job is to catch EVERY safety issue — missing nothing is more important than avoiding false positives.
+You are a conservative laboratory safety auditor. Only flag clear, directly observable safety violations.
+Do NOT guess; do NOT flag a violation based on uncertainty alone. Only use what is visible in this frame and the previous frame context.
 
 {manual_context}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PREVIOUS FRAME CONTEXT (t={prev_ts}s):
-{prev_context}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PREVIOUS FRAME (t={prev_ts}s): {prev_context}
 
-Now analyse this frame at timestamp {timestamp}s.
+Analyse this frame at timestamp {timestamp}s.
 
-Work through this checklist SYSTEMATICALLY for every person visible:
+MANDATORY CHECKLIST — answer every item, do not skip:
 
-PEOPLE & PPE:
-□ Lab coat — worn and fastened? (not just nearby, actually being WORN)
-□ Gloves — worn on BOTH hands?
-□ Eye protection — safety glasses or splash goggles actually ON the face?
-□ Footwear — closed-toe shoes visible?
-□ Hair — tied back if long?
-□ Any food, drink, or phone visible at the bench?
+PPE CHECK (for EVERY person visible):
+□ Lab coat: is it being worn AND fastened right now? If not worn → VIOLATION
+□ Gloves: on BOTH hands right now? If not → VIOLATION
+□ Eye protection (goggles/glasses): physically ON their face? If not → VIOLATION
+□ Closed-toe shoes visible? If sandals/bare feet → VIOLATION
+□ Long hair tied back? If loose hair near equipment → VIOLATION
+□ Food, drink, phone at bench? If yes → VIOLATION
 
-CHEMICAL HANDLING:
-□ Are containers labelled?
-□ Are containers capped/closed when not in immediate use?
-□ Is acid/base/flammable work happening OUTSIDE a fume hood?
-□ Are incompatible chemicals stored or used together?
+CHEMICAL SAFETY:
+□ Any unlabelled containers? → VIOLATION
+□ Any open/uncapped containers not being actively used? → VIOLATION
+□ Any chemical work happening outside a fume hood? → VIOLATION
+□ Acid, base, or solvent being poured without splash goggles? → VIOLATION
 
-EQUIPMENT:
-□ Fume hood: is the sash at the working height line or raised above it?
-□ Centrifuge: lid open during spin? Unbalanced load visible?
-□ Hotplate: unattended heating visible?
-□ Any cracked, broken, or damaged glassware in use?
+EQUIPMENT SAFETY:
+□ Fume hood sash above the marked working height line? → VIOLATION
+□ Centrifuge running with lid open or imbalanced samples? → VIOLATION
+□ Hotplate/heater left unattended? → VIOLATION
+□ Cracked, chipped, or damaged glassware in use? → VIOLATION
 
 ENVIRONMENT:
-□ Are exits or aisles blocked?
-□ Any spill not being contained?
-□ Any fire/explosion hazard visible?
+□ Spill not being cleaned up? → VIOLATION
+□ Emergency exit or aisle blocked? → VIOLATION
+□ Waste disposed in wrong container? → VIOLATION
 
-For each issue found, state the EXACT timestamp, the EXACT observation, and which rule is violated.
-If something cannot be determined from the image, state "cannot determine".
-Flag as potential_violation=true even if you are only 40% confident — it is better to flag and let
-the reasoning stage confirm than to miss a real violation.
+IMPORTANT RULES:
+- Only set potential_violation=true when the frame shows a specific, direct violation or an obviously missing PPE item.
+- Equipment safety violations are valid even when no person is visible in the frame. For example, a centrifuge with an obviously unbalanced load or a raised/sash hazard is still a violation.
+- For centrifuges: if there are visibly unbalanced sample positions, an obvious empty balance slot, or 5 of 6 positions loaded, flag it as a clear equipment safety violation.
+- If PPE is not visible, mark it as cannot_determine rather than missing. Do not over-flag uncertainty.
+- If there is no direct violation, set potential_violation=false and severity="none".
+- Use confidence values that match the evidence level; a definite PPE omission can be 0.8+, uncertain visibility should be lower.
 
-Respond ONLY with a valid JSON object — no prose, no markdown fences:
+Respond ONLY with valid JSON — no prose, no markdown:
 {{
-  "description": "<factual 1-2 sentence description of the overall scene>",
-  "people_count": <integer number of people visible>,
-  "objects_involved": ["<every piece of equipment, chemical, PPE item visible>"],
-  "actions_observed": ["<every action or behaviour by each person>"],
+  "description": "<1-2 sentence factual description>",
+  "people_count": <number>,
+  "objects_involved": ["<every item visible>"],
+  "actions_observed": ["<every action>"],
   "ppe_status": {{
     "lab_coat": "<worn|missing|cannot_determine>",
     "gloves": "<worn|missing|cannot_determine>",
     "eye_protection": "<worn|missing|cannot_determine>",
     "closed_toe_shoes": "<worn|missing|cannot_determine>"
   }},
-  "checklist_findings": ["<specific finding 1>", "<specific finding 2>", ...],
+  "checklist_findings": ["<every issue found, be specific>"],
   "potential_violation": <true|false>,
-  "violation_hint": "<describe every suspected violation, or empty string>",
+  "violation_hint": "<describe every issue found>",
   "severity": "<none|low|medium|high|critical>",
   "confidence": <0.0-1.0>
 }}
@@ -200,6 +201,8 @@ class VideoAnalyzer:
                     f"Frame {i+1}/{len(frames)} @ {frame['timestamp_sec']:.1f}s"
                     + (" — ⚠ violation flagged" if event and event.potential_violation else ""))
 
+        events = _collapse_adjacent_events(events)
+
         if on_progress:
             on_progress(0.87, "Cross-frame timeline analysis …")
 
@@ -266,25 +269,27 @@ class VideoAnalyzer:
             if not data:
                 return None
 
+            data = _sanitize_frame_result(data)
+
             # Combine checklist findings into the objects list for downstream retrieval
             objects    = data.get("objects_involved", [])
             chk        = data.get("checklist_findings", [])
             ppe_status = data.get("ppe_status", {})
 
-            # Auto-upgrade severity if PPE is clearly missing
             severity = data.get("severity", "none")
-            if (ppe_status.get("lab_coat") == "missing" or
-                ppe_status.get("gloves")    == "missing" or
-                ppe_status.get("eye_protection") == "missing"):
-                if severity in ("none", "low"):
-                    severity = "medium"
+            missing_ppe = [k for k, v in ppe_status.items() if v == "missing"]
+
+            if missing_ppe and severity in ("none", "low"):
+                severity = "medium"
+            if "lab_coat" in missing_ppe and len(missing_ppe) >= 2:
+                severity = "high"
 
             return DetectedEvent(
                 event_id            = str(uuid.uuid4()),
                 timestamp_sec       = frame["timestamp_sec"],
                 frame_index         = frame["frame_index"],
                 description         = data.get("description", ""),
-                objects_involved    = objects + chk,  # checklist findings feed into retrieval
+                objects_involved    = objects + chk,
                 actions_observed    = data.get("actions_observed", []),
                 potential_violation = bool(data.get("potential_violation", False)),
                 severity            = severity,
@@ -300,7 +305,7 @@ class VideoAnalyzer:
             return "No significant events detected."
 
         obs = "\n".join(
-            f"[{e.timestamp_sec:.1f}s] {e.description} "
+            f"[{format_human_time(e.timestamp_sec)}] {e.description} "
             f"(violation={e.potential_violation}, severity={e.severity})"
             for e in events
         )
@@ -331,15 +336,122 @@ class VideoAnalyzer:
         # Fallback: build summary from events without LLM
         violations = [e for e in events if e.potential_violation]
         if violations:
-            v_desc = "; ".join(f"{e.description[:60]} at {e.timestamp_sec:.0f}s" for e in violations[:4])
+            v_desc = "; ".join(
+                f"{e.description[:60]} at {format_human_time(e.timestamp_sec)}"
+                for e in violations[:4]
+            )
             return (f"Video analysis detected {len(violations)} potential safety violation(s) "
-                    f"across {len(events)} observed events covering {duration:.0f}s of footage. "
+                    f"across {len(events)} observed events covering {format_human_time(duration)} of footage. "
                     f"Key concerns: {v_desc}.")
         return (f"Video analysis completed: {len(events)} events observed across "
-                f"{duration:.0f}s of footage. No clear violations detected.")
+                f"{format_human_time(duration)} of footage. No clear violations detected.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _sanitize_frame_result(data: dict) -> dict:
+    """Guard against uncertain or generic cues being promoted into false violations."""
+    if not isinstance(data, dict):
+        return {}
+
+    cleaned = dict(data)
+    description = str(cleaned.get("description", "")).lower()
+    hint = str(cleaned.get("violation_hint", "")).lower()
+    combined_text = f"{description} {hint}".strip()
+    people_count = int(cleaned.get("people_count", 0) or 0)
+    ppe_status = cleaned.get("ppe_status", {}) or {}
+    missing_ppe = [k for k, v in ppe_status.items() if str(v).lower() == "missing"]
+
+    uncertain_markers = (
+        "cannot determine",
+        "uncertain",
+        "not clearly",
+        "no clear evidence",
+        "no direct violation",
+        "not visible",
+        "unable to determine",
+    )
+    if any(marker in combined_text for marker in uncertain_markers):
+        cleaned["potential_violation"] = False
+        cleaned["severity"] = "none"
+        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.35)
+        return cleaned
+
+    if people_count == 0 and missing_ppe:
+        cleaned["potential_violation"] = False
+        cleaned["severity"] = "none"
+        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.35)
+        return cleaned
+
+    direct_markers = (
+        "without",
+        "missing",
+        "not wearing",
+        "unbalanced",
+        "lid open",
+        "open lid",
+        "spill",
+        "blocked",
+        "cracked",
+        "overflow",
+        "not capped",
+    )
+    has_direct_evidence = any(marker in combined_text for marker in direct_markers)
+    if not has_direct_evidence and bool(cleaned.get("potential_violation")):
+        cleaned["potential_violation"] = False
+        cleaned["severity"] = "none"
+        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.4)
+
+    if cleaned.get("potential_violation") and float(cleaned.get("confidence", 0.0) or 0.0) < 0.55:
+        cleaned["potential_violation"] = False
+        cleaned["severity"] = "none"
+
+    return cleaned
+
+
+def _collapse_adjacent_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
+    """Merge repeated flag events that are the same issue across nearby frames."""
+    if not events:
+        return []
+
+    ordered = sorted(events, key=lambda e: (e.timestamp_sec, e.frame_index))
+    collapsed: list[DetectedEvent] = []
+
+    for event in ordered:
+        if not event.potential_violation:
+            if event.severity in ("none", "low"):
+                continue
+            collapsed.append(event)
+            continue
+
+        if not collapsed:
+            collapsed.append(event)
+            continue
+
+        last = collapsed[-1]
+        gap = event.timestamp_sec - last.timestamp_sec
+        if gap <= 8.0 and last.potential_violation and event.potential_violation:
+            same_desc = (
+                event.description.lower() == last.description.lower()
+                or set(event.description.lower().split()) & set(last.description.lower().split())
+            )
+            same_objects = set(str(x).lower() for x in event.objects_involved) & set(
+                str(x).lower() for x in last.objects_involved
+            )
+            if same_desc or same_objects:
+                merged = last.model_copy()
+                merged.timestamp_sec = min(last.timestamp_sec, event.timestamp_sec)
+                merged.frame_index = min(last.frame_index, event.frame_index)
+                merged.description = last.description if len(last.description) >= len(event.description) else event.description
+                merged.confidence = max(last.confidence, event.confidence)
+                merged.severity = max([last.severity, event.severity], key=lambda s: {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(s, 0))
+                collapsed[-1] = merged
+                continue
+
+        collapsed.append(event)
+
+    return collapsed
+
 
 def _build_manual_context(manual_text: str) -> str:
     """

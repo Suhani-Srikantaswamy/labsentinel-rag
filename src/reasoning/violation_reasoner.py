@@ -19,6 +19,7 @@ from src.utils.models import (
 )
 from src.utils.json_utils import parse_llm_json
 from src.utils.llm_client import get_client
+from src.utils.time_utils import format_human_time
 
 
 VIOLATION_PROMPT = """\
@@ -49,11 +50,12 @@ SIMILAR PAST INCIDENTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR TASK
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Is this a genuine safety violation? (be inclusive — if in doubt, say yes)
-2. Cite the EXACT rule from the manual above. If not in manual, state the universal principle.
-3. Give the EXACT timestamp (already provided above — use it verbatim).
-4. Explain specifically what went wrong and the concrete danger it creates.
-5. Give clear, actionable recommendations specific to what was observed.
+1. Only confirm a violation when it is directly supported by the evidence and visible in the scene.
+2. If the evidence is ambiguous, incomplete, or not actually visible, say false.
+3. Cite the EXACT rule from the manual above. If not in manual, state the universal principle.
+4. Give the EXACT timestamp (already provided above — use it verbatim).
+5. Explain specifically what went wrong and the concrete danger it creates.
+6. Give clear, actionable recommendations specific to what was observed.
 
 Rules for citation:
 - Quote the specific section/clause number and text if available.
@@ -167,7 +169,7 @@ class ViolationReasoner:
     ) -> InvestigationReport:
         report_id = report_id or str(uuid.uuid4())
         viol_lines = "\n".join(
-            f"- [{v.severity.upper()}] {v.violation_type} @ {v.event.timestamp_sec:.1f}s: {v.explanation[:120]}"
+            f"- [{v.severity.upper()}] {v.violation_type} @ {format_human_time(v.event.timestamp_sec)}: {v.explanation[:120]}"
             for v in violations
         ) or "No violations confirmed."
 
@@ -206,7 +208,7 @@ class ViolationReasoner:
                     f"Overall risk level is assessed as {overall_risk.upper()}. "
                     f"Immediate corrective actions are required as detailed in the violation section below."
                 )
-                findings = [f"{v.violation_type} at {v.event.timestamp_sec:.1f}s" for v in violations[:5]]
+                findings = [f"{v.violation_type} at {format_human_time(v.event.timestamp_sec)}" for v in violations[:5]]
                 actions  = [v.immediate_action for v in violations[:3] if v.immediate_action]
 
         return InvestigationReport(

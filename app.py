@@ -1,5 +1,6 @@
 """
 LabSentinel-RAG — Production Web Application
+ClimbingAddict-inspired design: dark dashboard, orange accents, light/dark toggle.
 """
 from __future__ import annotations
 import hashlib, json, os, shutil, tempfile, threading, time
@@ -34,7 +35,62 @@ def _extract_text(path: str) -> str:
     except Exception as e:
         logger.warning(f"Text extraction failed {p.name}: {e}"); return ""
 
+def _normalize_manual_files(manual_files):
+    if not manual_files:
+        return []
+    if isinstance(manual_files, (str, Path)):
+        manual_files = [manual_files]
+
+    flattened = []
+    for item in manual_files:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple, set)):
+            flattened.extend(_normalize_manual_files(item))
+            continue
+        if isinstance(item, dict):
+            if "path" in item and item["path"]:
+                flattened.append(item["path"])
+            elif "name" in item and item["name"]:
+                flattened.append(item["name"])
+            continue
+        flattened.append(item)
+
+    seen = set()
+    ordered = []
+    for item in flattened:
+        key = str(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item)
+    return ordered
+
+
+def _coerce_file_path(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            p = _coerce_file_path(item)
+            if p:
+                return p
+        return None
+    if isinstance(value, dict):
+        for key in ("path", "file", "value"):
+            if key in value and value[key]:
+                return _coerce_file_path(value[key])
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    return str(value)
+
+
 def _combine_manuals(files):
+    files = _normalize_manual_files(files)
     if not files: return ""
     parts = []
     for f in files:
@@ -44,65 +100,44 @@ def _combine_manuals(files):
     return "\n\n".join(parts)
 
 def _url_cache_path(url: str) -> Path:
-    """Return a stable cache path for a URL so we don't re-download."""
     from config.settings import VIDEO_DIR
     h = hashlib.md5(url.encode()).hexdigest()[:10]
     return VIDEO_DIR / f"cached_{h}.mp4"
 
 def _download_url(url: str, progress_cb=None):
-    """
-    Download video from URL. Caches to data/videos/ so re-runs are instant.
-    Returns (path, tmp_dir_or_None, error_or_None)
-    """
-    # Check cache first
     cached = _url_cache_path(url)
     if cached.exists() and cached.stat().st_size > 10_000:
         logger.info(f"Using cached video: {cached}")
-        if progress_cb: progress_cb(1.0, f"Using cached video ({cached.stat().st_size//1024//1024} MB)")
+        if progress_cb: progress_cb(1.0, f"✅ Using cached video ({cached.stat().st_size//1024//1024} MB)")
         return str(cached), None, None
-
     tmp = tempfile.mkdtemp()
     try:
         import yt_dlp
-
-        class ProgressHook:
+        class Hook:
             def __call__(self, d):
                 if d['status'] == 'downloading' and progress_cb:
                     total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-                    downloaded = d.get('downloaded_bytes', 0)
+                    done  = d.get('downloaded_bytes', 0)
                     if total > 0:
-                        pct = downloaded / total
-                        mb_done = downloaded / 1024 / 1024
-                        mb_total = total / 1024 / 1024
-                        progress_cb(pct * 0.95, f"Downloading {mb_done:.1f} / {mb_total:.1f} MB …")
-
+                        progress_cb(done/total*0.95,
+                            f"Downloading {done/1024/1024:.1f} / {total/1024/1024:.1f} MB …")
         opts = {
-            "format": (
-                "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]"
-                "/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]"
-                "/bestvideo[height<=480]+bestaudio"
-                "/best[height<=480]/best"
-            ),
-            "outtmpl":                       str(Path(tmp) / "video.%(ext)s"),
-            "merge_output_format":           "mp4",
-            "quiet":                         True,
-            "no_warnings":                   True,
-            "noplaylist":                    True,
-            "ffmpeg_location":               "/opt/homebrew/bin/ffmpeg",
+            "format": ("bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]"
+                       "/bestvideo[height<=480]+bestaudio/best[height<=480]/best"),
+            "outtmpl": str(Path(tmp)/"video.%(ext)s"),
+            "merge_output_format": "mp4", "quiet": True,
+            "no_warnings": True, "noplaylist": True,
+            "ffmpeg_location": "/opt/homebrew/bin/ffmpeg",
             "concurrent_fragment_downloads": 8,
-            "progress_hooks":                [ProgressHook()],
+            "progress_hooks": [Hook()],
         }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-
-        for ext in ("mp4", "webm", "mkv", "avi", "mov"):
+        with yt_dlp.YoutubeDL(opts) as ydl: ydl.download([url])
+        for ext in ("mp4","webm","mkv","avi","mov"):
             files = list(Path(tmp).glob(f"*.{ext}"))
             if files:
-                # Save to cache for next time
                 shutil.copy(str(files[0]), str(cached))
                 if progress_cb: progress_cb(1.0, f"Download complete ({cached.stat().st_size//1024//1024} MB)")
                 return str(cached), tmp, None
-
         return None, tmp, "Download completed but no video file found."
     except Exception as e:
         return None, tmp, f"Download failed: {e}"
@@ -112,13 +147,10 @@ def _run_pipeline(video_path, manual_text, sample_rate, max_frames, chunk_sec, p
         from src.pipeline import LabSentinelPipeline
         pipeline = LabSentinelPipeline()
         report = pipeline.run(
-            video_path         = video_path,
-            manual_text        = manual_text,
-            sample_rate        = sample_rate or None,
-            max_frames         = max_frames  or None,
-            chunk_duration_sec = chunk_sec   or None,
-            on_progress        = lambda p, m: pq.put((p, m)),
-            verbose            = False,
+            video_path=video_path, manual_text=manual_text,
+            sample_rate=sample_rate or None, max_frames=max_frames or None,
+            chunk_duration_sec=chunk_sec or None,
+            on_progress=lambda p, m: pq.put((p, m)), verbose=False,
         )
         holder["report"] = report
     except Exception as e:
@@ -126,60 +158,54 @@ def _run_pipeline(video_path, manual_text, sample_rate, max_frames, chunk_sec, p
     finally:
         pq.put(None)
 
-# ── Main investigation callback ───────────────────────────────────────────────
+# ── Main investigation ────────────────────────────────────────────────────────
 
 def investigate(video_file, video_url, manual_files,
                 sample_rate, max_frames, chunk_sec,
                 progress=gr.Progress(track_tqdm=False)):
 
+    manual_files = _normalize_manual_files(manual_files)
+
     ok, msg = _api_ok()
     if not ok:
         return _err("API Key Missing", [
-            "FREE option: Get a Google Gemini key at https://aistudio.google.com",
+            "Get a FREE Google Gemini key at https://aistudio.google.com/apikey",
             "Add to .env:  GOOGLE_API_KEY=your-key",
             "Restart the app: python app.py",
-        ]), "{}", None, _stat("❌", "No API key"), ""
+        ]), "{}", None, _stat("❌", "No API key"), "", _load_history(5)
 
-    # Resolve video
     video_path = None; tmp_dir = None
     if video_url and video_url.strip():
-        progress(0.01, desc="Checking download cache …")
         cached = _url_cache_path(video_url.strip())
         if cached.exists() and cached.stat().st_size > 10_000:
             video_path = str(cached)
-            progress(0.05, desc=f"✅ Using cached video ({cached.stat().st_size//1024//1024} MB) — skipping download")
+            progress(0.05, desc=f"✅ Cached video ({cached.stat().st_size//1024//1024} MB)")
         else:
             progress(0.02, desc="Downloading video …")
             video_path, tmp_dir, err = _download_url(
                 video_url.strip(),
-                progress_cb=lambda p, m: progress(0.02 + p * 0.10, desc=m)
-            )
+                progress_cb=lambda p, m: progress(0.02 + p * 0.10, desc=m))
             if err:
-                return _err("Download Failed", [err, "Try uploading the video file directly instead."]), "{}", None, _stat("❌", "Download failed"), ""
-    elif video_file is not None:
-        video_path = str(video_file)
+                return _err("Download Failed", [err, "Try uploading the video directly."]), "{}", None, _stat("❌", "Download failed"), "", _load_history(5)
     else:
-        return _err("No Video", ["Upload a video file or paste a URL above."]), "{}", None, _stat("⚠️", "No input"), ""
+        video_path = _coerce_file_path(video_file)
+        if not video_path:
+            return _err("No Video", ["Upload a video file or paste a URL."]), "{}", None, _stat("⚠️", "No input"), "", _load_history(5)
 
-    # Extract manual text
     progress(0.13, desc="Reading lab manual …")
-    manual_text = _combine_manuals(manual_files) if manual_files else ""
-    manual_label = (f"{len([f for f in (manual_files or []) if f])} manual file(s), {len(manual_text):,} chars"
+    manual_text  = _combine_manuals(manual_files) if manual_files else ""
+    manual_label = (f"{len([f for f in (manual_files or []) if f])} file(s), {len(manual_text):,} chars"
                     if manual_text else "No manual — universal rules applied")
 
-    # Run pipeline
     progress(0.15, desc="Starting investigation …")
     pq = Queue(); holder = {}
     t  = threading.Thread(target=_run_pipeline,
-                          args=(video_path, manual_text, sample_rate, max_frames, chunk_sec, pq, holder),
-                          daemon=True)
+         args=(video_path, manual_text, sample_rate, max_frames, chunk_sec, pq, holder), daemon=True)
     t.start()
 
     while True:
-        try:
-            item = pq.get(timeout=900)
-        except Empty:
-            break
+        try: item = pq.get(timeout=900)
+        except Empty: break
         if item is None: break
         pct, msg2 = item
         progress(min(0.15 + pct * 0.80, 0.96), desc=msg2)
@@ -187,11 +213,11 @@ def investigate(video_file, video_url, manual_files,
     t.join(timeout=15)
 
     if "error" in holder:
-        return _err("Investigation Failed", [holder["error"]]), "{}", None, _stat("❌", holder["error"][:80]), ""
+        return _err("Investigation Failed", [holder["error"]]), "{}", None, _stat("❌", holder["error"][:80]), "", _load_history(5)
 
     report = holder.get("report")
     if not report:
-        return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), ""
+        return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5)
 
     progress(0.97, desc="Rendering report …")
     from src.report.report_generator import ReportGenerator
@@ -203,19 +229,19 @@ def investigate(video_file, video_url, manual_files,
     except Exception as e: logger.warning(f"PDF failed: {e}")
 
     if tmp_dir: shutil.rmtree(tmp_dir, ignore_errors=True)
-
     progress(1.0, desc="Done!")
-    r   = report.overall_risk_level
+
+    r = report.overall_risk_level
     status_html = _stat("✅",
         f"Complete — <b>{report.total_violations} violation(s)</b> | "
         f"Risk: <b style='color:{_risk_col(r)}'>{r.upper()}</b> | "
-        f"{len(report.timeline)} events | {report.metadata.get('frames_sampled','?')} frames | {manual_label}")
-    return html, js, pdf, status_html, _summary_md(report, manual_label)
+        f"{len(report.timeline)} events | {report.metadata.get('frames_sampled','?')} frames")
+    return html, js, pdf, status_html, _summary_md(report, manual_label), _load_history(5)
 
 # ── KB builder ────────────────────────────────────────────────────────────────
 
 def build_kb(sop_f, man_f, inc_f, sop_d, man_d, inc_d, reset, progress=gr.Progress()):
-    progress(0.05, desc="Loading documents …")
+    progress(0.05, desc="Loading …")
     try:
         from src.ingestion.document_loader import DocumentLoader
         from src.ingestion.knowledge_base_builder import KnowledgeBaseBuilder
@@ -239,7 +265,7 @@ def build_kb(sop_f, man_f, inc_f, sop_d, man_d, inc_d, reset, progress=gr.Progre
         counts = builder.build(chunks=chunks)
         stats  = builder.get_stats()
         progress(1.0)
-        lines = [f"### ✅ Knowledge base updated — {sum(counts.values())} chunks indexed\n",
+        lines = [f"### ✅ Knowledge base updated — {sum(counts.values())} chunks\n",
                  "| Collection | Chunks |", "|---|---|"]
         for k, v in stats.items(): lines.append(f"| {k.title()} | {v} |")
         return "\n".join(lines)
@@ -253,36 +279,73 @@ def get_status():
     try:
         from src.ingestion.knowledge_base_builder import KnowledgeBaseBuilder
         stats = KnowledgeBaseBuilder().get_stats()
-    except: stats = {}
+    except:
+        stats = {}
     total = sum(stats.values())
-    lines = ["| Check | Status |", "|---|---|",
-             f"| AI Provider | {pi['status_msg']} |",
-             f"| Knowledge Base | {'✅ ' + str(total) + ' chunks' if total else '⚠ Empty'} |"]
-    for k, v in stats.items(): lines.append(f"| — {k.title()} | {v} |")
-    lines += ["", "### Settings",
-              f"| Model | `{pi['model']}` ({'FREE' if pi['is_free'] else 'paid'}) |",
-              f"| Frame rate | every `{settings.video.frame_sample_rate}s` |",
-              f"| Max frames | `{settings.video.max_frames}` |",
-              f"| Embeddings | `{settings.rag.embedding_model}` (local) |"]
-    return "\n".join(lines)
 
-# ── Template helpers ──────────────────────────────────────────────────────────
+    api_ok  = pi.get("configured", False)
+    kb_ok   = total > 0
+    model   = pi.get("model", "—")
+    is_free = pi.get("is_free", True)
 
-def _risk_col(r): return {"low":"#16a34a","medium":"#d97706","high":"#ea580c","critical":"#dc2626"}.get(r,"#64748b")
+    def row(label, value, ok=None):
+        dot = ""
+        if ok is True:  dot = '<span style="color:#22c55e;font-size:1.1em">✅</span> '
+        if ok is False: dot = '<span style="color:#ef4444;font-size:1.1em">❌</span> '
+        return (f'<tr>'
+                f'<td style="padding:10px 14px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);font-size:0.85em;font-weight:500;width:180px">{label}</td>'
+                f'<td style="padding:10px 14px;border-bottom:1px solid var(--ls-border);color:var(--ls-text);font-size:0.85em">{dot}{value}</td>'
+                f'</tr>')
+
+    kb_rows = ""
+    for k, v in stats.items():
+        kb_rows += row(f"&nbsp;&nbsp;&nbsp;{k.title()}", f"{v} chunks")
+
+    prov_val = f"{pi['status_msg'].replace('✅ ','')}" if api_ok else pi['status_msg'].replace('❌ ','')
+
+    html = f"""
+<div style="font-family:Inter,sans-serif;max-width:720px">
+  <h3 style="color:var(--ls-text);font-size:1.0em;font-weight:700;margin:0 0 14px">System Status</h3>
+  <table style="width:100%;border-collapse:collapse;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:10px;overflow:hidden">
+    {row("AI Provider", prov_val, api_ok)}
+    {row("Knowledge Base", f"{total} chunks indexed" if kb_ok else "Empty — run Build KB", kb_ok)}
+    {kb_rows}
+  </table>
+
+  <h3 style="color:var(--ls-text);font-size:1.0em;font-weight:700;margin:22px 0 12px">Active Configuration</h3>
+  <table style="width:100%;border-collapse:collapse;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:10px;overflow:hidden">
+    {row("Model", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{model}</code> &nbsp;<span style="font-size:0.78em;color:{"#22c55e" if is_free else "#f59e0b"};font-weight:600">{"FREE" if is_free else "PAID"}</span>')}
+    {row("Frame sample rate", f'Every <code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.video.frame_sample_rate}s</code>')}
+    {row("Max frames per video", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.video.max_frames}</code>')}
+    {row("Embedding model", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.rag.embedding_model}</code> &nbsp;<span style="font-size:0.78em;color:var(--ls-text3)">runs locally</span>')}
+    {row("Similarity threshold", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.rag.similarity_threshold}</code>')}
+  </table>
+</div>"""
+    return html
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _risk_col(r):
+    return {"low":"#16a34a","medium":"#d97706","high":"#ea580c","critical":"#dc2626"}.get(r,"#94a3b8")
 
 def _stat(icon, msg):
-    return f'<div style="padding:10px 16px;border-radius:8px;background:#1e293b;color:#e2e8f0;font-size:0.92em">{icon} {msg}</div>'
+    return (f'<div style="padding:10px 14px;border-radius:8px;'
+            f'background:var(--ls-surface2);border:1px solid var(--ls-border);'
+            f'color:var(--ls-text2);font-size:0.88em;font-family:Inter,sans-serif">'
+            f'{icon} {msg}</div>')
 
 def _summary_md(report, manual_label):
+    from src.report.report_generator import _fmt_ts
     r = report.overall_risk_level
-    emoji = {"low":"🟢","medium":"🟡","high":"🟠","critical":"🔴"}.get(r,"⚪")
-    lines = [f"## {emoji} Investigation Complete\n",
-             f"| | |", "|---|---|",
-             f"| **Risk Level** | **{r.upper()}** |",
+    e = {"low":"🟢","medium":"🟡","high":"🟠","critical":"🔴"}.get(r,"⚪")
+    dur = _fmt_ts(report.metadata.get("duration_sec", 0))
+    lines = [f"## {e} Investigation Complete\n",
+             "| | |", "|---|---|",
+             f"| **Risk** | **{r.upper()}** |",
              f"| **Violations** | {report.total_violations} |",
              f"| **Events** | {len(report.timeline)} |",
              f"| **Frames** | {report.metadata.get('frames_sampled','?')} |",
-             f"| **Duration** | {report.metadata.get('duration_sec','?')}s |",
+             f"| **Duration** | {dur} |",
              f"| **Manual** | {manual_label} |",
              f"\n**{report.incident_summary}**"]
     if report.key_findings:
@@ -291,254 +354,847 @@ def _summary_md(report, manual_label):
     return "\n".join(lines)
 
 def _err(title, tips):
-    items = "".join(f"<li style='margin:4px 0'>{t}</li>" for t in tips)
-    return f"""
-    <div style="background:#1e293b;border:1px solid #ef4444;border-radius:12px;padding:28px 32px;margin:8px 0">
-      <h3 style="color:#ef4444;margin:0 0 12px">⚠ {title}</h3>
-      <ul style="color:#cbd5e1;margin:0;padding-left:20px;line-height:1.8">{items}</ul>
-    </div>"""
+    items = "".join(f"<li style='margin:5px 0;color:var(--ls-text2)'>{t}</li>" for t in tips)
+    return (f'<div style="background:var(--ls-surface);border:1px solid #ef444440;'
+            f'border-left:3px solid #ef4444;border-radius:10px;padding:24px 28px;margin:8px 0;'
+            f'font-family:Inter,sans-serif">'
+            f'<h3 style="color:#ef4444;margin:0 0 10px;font-size:1em">⚠ {title}</h3>'
+            f'<ul style="margin:0;padding-left:18px;line-height:1.8">{items}</ul></div>')
+
+
+def _load_history_report(report_path: str):
+    if not report_path:
+        return PLACEHOLDER, "{}", None, _stat("⚠️", "No history item selected"), "", _load_history(5)
+
+    path = Path(report_path)
+    if not path.exists():
+        return PLACEHOLDER, "{}", None, _stat("⚠️", "History report not found"), "", _load_history(5)
+
+    try:
+        import json as _json
+        from src.utils.models import InvestigationReport
+        from src.report.report_generator import ReportGenerator
+
+        with path.open() as f:
+            data = _json.load(f)
+        report = InvestigationReport.model_validate(data)
+        gen = ReportGenerator()
+        html = gen._render_html(report)
+        js = json.dumps(report.model_dump(mode="json"), indent=2, default=str)
+        pdf = None
+        try:
+            pdf = gen.to_pdf(report)
+        except Exception as e:
+            logger.warning(f"History PDF failed: {e}")
+
+        manual_label = report.metadata.get("manual_label") or "Historical report"
+        return (
+            html,
+            js,
+            pdf,
+            _stat("✅",
+                f"Loaded historical report — <b>{report.total_violations} violation(s)</b> | "
+                f"Risk: <b style='color:{_risk_col(report.overall_risk_level)}'>{report.overall_risk_level.upper()}</b> | "
+                f"{len(report.timeline)} events"),
+            _summary_md(report, manual_label),
+            _load_history(5),
+        )
+    except Exception as e:
+        logger.exception(e)
+        return PLACEHOLDER, "{}", None, _stat("❌", f"Could not load report: {e}"), "", _load_history(5)
+
+
+def _load_history(n: int = 5) -> str:
+    """Load last N investigation reports from outputs/ and render as HTML cards."""
+    from config.settings import OUTPUT_DIR
+    import glob, json as _json
+
+    reports = sorted(
+        glob.glob(str(OUTPUT_DIR / "report_*.json")),
+        key=lambda p: Path(p).stat().st_mtime,
+        reverse=True
+    )[:n]
+
+    if not reports:
+        return (
+            '<div style="padding:12px;text-align:center;color:var(--ls-text3);font-size:0.8em">'
+            'No past investigations yet</div>'
+        )
+
+    risk_colors = {"low":"#16a34a","medium":"#d97706","high":"#ea580c","critical":"#dc2626"}
+    risk_bg     = {"low":"#16a34a18","medium":"#d9770618","high":"#ea580c18","critical":"#dc262618"}
+    cards = []
+    for rp in reports:
+        try:
+            with open(rp) as f:
+                d = _json.load(f)
+            r       = d.get("overall_risk_level","low")
+            n_viol  = d.get("total_violations", 0)
+            n_ev    = len(d.get("timeline", []))
+            vid     = Path(d.get("video_path","?")).name[:28]
+            gen_at  = d.get("generated_at","")[:16].replace("T"," ")
+            dur_s   = d.get("metadata",{}).get("duration_sec", 0)
+            from src.report.report_generator import _fmt_ts
+            dur     = _fmt_ts(dur_s)
+            rc      = risk_colors.get(r,"#94a3b8")
+            rb      = risk_bg.get(r,"#94a3b818")
+            cards.append(f"""
+<div class="ls-history-card" data-history-id="{rp}" style="padding:10px 12px;border-radius:8px;border:1px solid var(--ls-border);
+            background:var(--ls-surface);margin-bottom:6px;cursor:pointer;transition:border-color 0.15s"
+     onmouseover="this.style.borderColor='var(--ls-orange)'"
+     onmouseout="this.style.borderColor='var(--ls-border)'">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+    <span style="font-size:0.78em;font-weight:600;color:var(--ls-text);
+                 overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px"
+          title="{vid}">{vid}</span>
+    <span style="font-size:0.7em;padding:2px 8px;border-radius:10px;font-weight:700;
+                 color:{rc};background:{rb}">{r.upper()}</span>
+  </div>
+  <div style="display:flex;gap:12px;font-size:0.72em;color:var(--ls-text3)">
+    <span>⚠ {n_viol} violations</span>
+    <span>📋 {n_ev} events</span>
+    <span>⏱ {dur}</span>
+  </div>
+  <div style="font-size:0.68em;color:var(--ls-text3);margin-top:3px">{gen_at}</div>
+</div>""")
+        except Exception:
+            continue
+
+    if not cards:
+        return '<div style="padding:12px;text-align:center;color:var(--ls-text3);font-size:0.8em">No valid history found</div>'
+
+    return "".join(cards)
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 
 CSS = """
-* { box-sizing: border-box; }
-body, .gradio-container { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif !important; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+/* ════════════════════════════════════════
+   LIGHT MODE — warm, textured, alive
+   ════════════════════════════════════════ */
+:root, .light {
+  --ls-bg:        #FDF8F3;
+  --ls-surface:   #FFFFFF;
+  --ls-surface2:  #FAF4ED;
+  --ls-surface3:  #F5EDE2;
+  --ls-border:    #EAE0D5;
+  --ls-border2:   #D9CCBE;
+  --ls-text:      #1C1714;
+  --ls-text2:     #6B5E52;
+  --ls-text3:     #A89B8E;
+  --ls-orange:    #F5623A;
+  --ls-orange2:   #E04E28;
+  --ls-oglow:     rgba(245,98,58,0.20);
+  --ls-odim:      rgba(245,98,58,0.08);
+  --ls-input:     #FFFFFF;
+  --ls-accent1:   #FFF4ED;
+  --ls-accent2:   #FDE8DB;
+}
+
+/* ════════════════════════════════════════
+   DARK MODE — charcoal, warm undertone
+   ════════════════════════════════════════ */
+.dark {
+  --ls-bg:        #0E0D0B;
+  --ls-surface:   #171613;
+  --ls-surface2:  #1F1E1A;
+  --ls-surface3:  #272520;
+  --ls-border:    #2C2A25;
+  --ls-border2:   #3A3730;
+  --ls-text:      #F0EBE4;
+  --ls-text2:     #9E9488;
+  --ls-text3:     #5C574F;
+  --ls-orange:    #F5623A;
+  --ls-orange2:   #FF7550;
+  --ls-oglow:     rgba(245,98,58,0.22);
+  --ls-odim:      rgba(245,98,58,0.10);
+  --ls-input:     #171613;
+  --ls-accent1:   #1F1510;
+  --ls-accent2:   #2A1A12;
+}
+
+/* ── Reset ── */
+*, *::before, *::after { box-sizing: border-box !important; }
 footer { display: none !important; }
-.gradio-container { max-width: 1440px !important; margin: 0 auto !important; background: #0f172a !important; }
+body, .gradio-container {
+  font-family: 'Inter', system-ui, sans-serif !important;
+  background: var(--ls-bg) !important;
+  color: var(--ls-text) !important;
+}
+/* Container: fixed-width centred card */
+html, body {
+  width: 100% !important;
+  min-height: 100vh !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+body {
+  background: #1a1a1a !important;
+  display: block !important;
+  text-align: center !important;
+}
+.gradio-container {
+  width: min(1200px, calc(100vw - 28px)) !important;
+  max-width: 1200px !important;
+  margin: 20px auto !important;
+  padding: 0 !important;
+  display: block !important;
+  text-align: left !important;
+}
 
-/* Hero */
-.hero {
-  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #0f2a1e 100%);
-  border-radius: 16px; padding: 32px 40px 24px; margin-bottom: 20px;
-  border: 1px solid #1e3a5f;
+.gradio-container > div { width: 100% !important; }
+
+/* ── Topbar ── */
+.ls-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; height: 52px;
+  background: var(--ls-surface); border-bottom: 1px solid var(--ls-border);
+  position: sticky; top: 0; z-index: 200;
 }
-.hero h1 { font-size: 2.4em; font-weight: 800; margin: 0 0 6px; color: #f8fafc; letter-spacing: -1px; }
-.hero p  { color: #94a3b8; margin: 0 0 14px; font-size: 1.05em; }
-.pill {
-  display: inline-block; background: rgba(59,130,246,0.15);
-  border: 1px solid rgba(59,130,246,0.3); border-radius: 20px;
-  padding: 3px 14px; font-size: 0.78em; color: #93c5fd; margin-right: 6px; margin-top: 4px;
+.ls-logo {
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 800; font-size: 1.05em; letter-spacing: -0.4px; color: var(--ls-text);
+}
+.ls-logo-icon {
+  width: 30px; height: 30px; background: var(--ls-orange); border-radius: 7px;
+  display: flex; align-items: center; justify-content: center; font-size: 15px;
+  box-shadow: 0 0 14px var(--ls-oglow);
+}
+.ls-logo span { color: var(--ls-orange); }
+.ls-topbar-right { display: flex; align-items: center; gap: 10px; }
+.ls-chip {
+  display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+  border-radius: 20px; border: 1px solid var(--ls-border);
+  font-size: 0.74em; font-weight: 500; color: var(--ls-text2); background: var(--ls-surface2);
+}
+.ls-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e; box-shadow: 0 0 6px #22c55e90; flex-shrink: 0;
+}
+#theme-toggle {
+  width: 34px; height: 34px;
+  border: 1px solid var(--ls-border) !important;
+  border-radius: 8px !important; background: var(--ls-surface2) !important;
+  color: var(--ls-text2) !important; cursor: pointer !important;
+  font-size: 15px !important; transition: all 0.2s !important;
+  padding: 0 !important; min-width: unset !important; box-shadow: none !important;
+  display: flex !important; align-items: center !important; justify-content: center !important;
+}
+#theme-toggle:hover { border-color: var(--ls-orange) !important; color: var(--ls-orange) !important; }
+
+/* ── Tabs ── */
+.tab-nav {
+  border-bottom: 1px solid var(--ls-border) !important;
+  background: var(--ls-surface) !important; padding: 0 20px !important;
+}
+.tab-nav button {
+  color: var(--ls-text3) !important; font-weight: 500 !important;
+  font-size: 0.84em !important; padding: 13px 15px !important;
+  border-radius: 0 !important; border-bottom: 2px solid transparent !important;
+  transition: all 0.2s !important;
+}
+.tab-nav button:hover { color: var(--ls-text2) !important; }
+.tab-nav button.selected { color: var(--ls-orange) !important; border-bottom-color: var(--ls-orange) !important; }
+
+/* ── Section label ── */
+.ls-section-label {
+  font-size: 0.62em !important; font-weight: 700 !important;
+  text-transform: uppercase !important; letter-spacing: 1.5px !important;
+  color: var(--ls-text3) !important; margin-bottom: 8px !important; display: block !important;
 }
 
-/* Panels */
-.panel {
-  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
-  padding: 20px 22px; margin-bottom: 14px;
-}
-.panel-title {
-  font-size: 0.7em; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 1.2px; color: #64748b; margin: 0 0 12px;
+/* Investigate tab sidebar row */
+#investigate-row {
+  width: 100% !important;
+  min-height: 620px !important;
+  gap: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-top: 1px solid var(--ls-border) !important;
+  background: var(--ls-bg) !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch !important;
 }
 
-/* Run button */
+/* Left sidebar panel */
+.ls-left {
+  background: var(--ls-surface) !important;
+  border-right: 1px solid var(--ls-border) !important;
+  padding: 12px 10px 12px 12px !important;
+  overflow-y: auto !important;
+  flex-shrink: 0 !important;
+  min-width: 320px !important;
+}
+
+/* Right content panel */
+.ls-right {
+  background: var(--ls-surface) !important;
+  padding: 12px 16px 16px !important;
+  overflow-y: auto !important;
+  flex: 1 !important;
+  min-height: 520px !important;
+}
+
+/* ── Upload zones ── */
+.gradio-file, .gradio-video {
+  background: var(--ls-surface2) !important;
+  border: 1.5px dashed var(--ls-border2) !important;
+  border-radius: 10px !important; transition: all 0.2s !important;
+}
+.gradio-file:hover, .gradio-video:hover {
+  border-color: var(--ls-orange) !important; background: var(--ls-odim) !important;
+}
+
+/* ── Text inputs ── */
+.gradio-textbox textarea, .gradio-textbox input, .gradio-number input {
+  background: var(--ls-input) !important;
+  border: 1.5px solid var(--ls-border2) !important;
+  border-radius: 8px !important; color: var(--ls-text) !important;
+  font-family: 'Inter', sans-serif !important; font-size: 0.85em !important;
+  transition: border-color 0.2s !important;
+}
+.gradio-textbox textarea:focus, .gradio-textbox input:focus, .gradio-number input:focus {
+  border-color: var(--ls-orange) !important;
+  box-shadow: 0 0 0 3px var(--ls-odim) !important; outline: none !important;
+}
+
+/* ── Labels ── */
+.gradio-textbox label, .gradio-file label, .gradio-video label,
+.gradio-number label, .gradio-checkbox label {
+  color: var(--ls-text2) !important; font-size: 0.8em !important; font-weight: 500 !important;
+}
+
+/* ── Accordion ── */
+.gradio-accordion {
+  background: var(--ls-surface2) !important;
+  border: 1px solid var(--ls-border) !important; border-radius: 10px !important;
+}
+.gradio-accordion .label-wrap span { color: var(--ls-text2) !important; font-size: 0.82em !important; }
+
+/* ── RUN BUTTON ── */
 #run-btn {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
-  color: #fff !important; font-size: 1.05em !important; font-weight: 700 !important;
-  border-radius: 10px !important; border: none !important; padding: 14px !important;
-  box-shadow: 0 4px 20px rgba(37,99,235,0.4) !important; transition: all 0.2s !important;
-  letter-spacing: 0.3px !important;
+  background: var(--ls-orange) !important;
+  color: #fff !important; border: none !important; border-radius: 10px !important;
+  font-weight: 700 !important; font-size: 0.92em !important; padding: 14px !important;
+  box-shadow: 0 4px 18px var(--ls-oglow) !important; transition: all 0.2s !important;
+  font-family: 'Inter', sans-serif !important;
 }
-#run-btn:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 28px rgba(37,99,235,0.5) !important; }
+#run-btn:hover {
+  background: var(--ls-orange2) !important; transform: translateY(-1px) !important;
+  box-shadow: 0 8px 26px var(--ls-oglow) !important;
+}
+#run-btn:active { transform: translateY(0) !important; }
 
-/* PDF button */
-.pdf-download button {
-  background: linear-gradient(135deg, #dc2626, #b91c1c) !important;
-  color: white !important; font-weight: 700 !important; border-radius: 8px !important; border: none !important;
+/* ── PDF button ── */
+.pdf-btn button {
+  background: var(--ls-orange) !important; color: white !important;
+  font-weight: 600 !important; border-radius: 8px !important; border: none !important;
 }
 
-/* Tabs */
-.tab-nav { border-bottom: 1px solid #334155 !important; }
-.tab-nav button { color: #94a3b8 !important; font-weight: 500 !important; }
-.tab-nav button.selected { color: #60a5fa !important; border-bottom-color: #3b82f6 !important; }
-
-/* Inputs */
-.gradio-textbox textarea, .gradio-textbox input { background: #0f172a !important; border-color: #334155 !important; color: #e2e8f0 !important; border-radius: 8px !important; }
-.gradio-number input { background: #0f172a !important; border-color: #334155 !important; color: #e2e8f0 !important; border-radius: 8px !important; }
-
-/* Accordion */
-.gradio-accordion { background: #1e293b !important; border: 1px solid #334155 !important; border-radius: 8px !important; }
-
-/* Markdown */
-.gradio-markdown { color: #e2e8f0 !important; }
-.gradio-markdown h2 { color: #f1f5f9 !important; }
-.gradio-markdown table { border-collapse: collapse; width: 100%; }
-.gradio-markdown th { background: #334155 !important; color: #f1f5f9 !important; padding: 8px 12px !important; }
-.gradio-markdown td { border: 1px solid #334155 !important; padding: 7px 12px !important; color: #cbd5e1 !important; }
-
-/* File upload */
-.gradio-file { background: #0f172a !important; border: 2px dashed #334155 !important; border-radius: 10px !important; }
-.gradio-video { background: #0f172a !important; border: 2px dashed #334155 !important; border-radius: 10px !important; }
-
-/* Placeholder */
-.placeholder-box {
-  background: #1e293b; border: 2px dashed #334155; border-radius: 16px;
-  padding: 60px 40px; text-align: center; color: #64748b;
+/* ── Code/JSON ── */
+.gradio-code {
+  background: var(--ls-surface2) !important;
+  border: 1px solid var(--ls-border) !important; border-radius: 10px !important;
 }
+
+/* ── Markdown ── */
+.gradio-markdown { color: var(--ls-text) !important; }
+.gradio-markdown h2 { color: var(--ls-text) !important; font-weight: 700 !important; }
+.gradio-markdown table { border-collapse: collapse !important; width: 100% !important; }
+.gradio-markdown th {
+  background: var(--ls-surface3) !important; color: var(--ls-text2) !important;
+  padding: 8px 12px !important; border: 1px solid var(--ls-border) !important; font-size: 0.82em !important;
+}
+.gradio-markdown td {
+  padding: 7px 12px !important; border: 1px solid var(--ls-border) !important;
+  color: var(--ls-text2) !important; font-size: 0.85em !important;
+}
+.gradio-markdown strong { color: var(--ls-text) !important; }
+
+/* ════════════════════════════════════════════════════════
+   FULL-WIDTH LAYOUT — target elem_ids directly
+   ════════════════════════════════════════════════════════ */
+
+/* Gradio container fills viewport / centred content area */
+.gradio-container,
+#main-tabs,
+#main-tabs > div {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.gradio-container > div:not(.ls-history-wrap) {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+/* Each tab fills full width */
+#tab-investigate,
+#tab-kb,
+#tab-status,
+#tab-how,
+#tab-investigate > div,
+#tab-kb > div,
+#tab-status > div,
+#tab-how > div {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: var(--ls-bg) !important;
+  min-height: calc(100vh - 112px) !important;
+}
+
+/* KB, Status, How It Works inner column fills full width */
+#kb-page,
+#status-page,
+#how-page,
+#kb-page > div,
+#status-page > div,
+#how-page > div {
+  width: 100% !important;
+  min-width: 100% !important;
+  max-width: 100% !important;
+  padding: 20px 24px !important;
+  background: var(--ls-bg) !important;
+  min-height: calc(100vh - 112px) !important;
+  box-sizing: border-box !important;
+}
+
+/* Investigate sidebar row */
+#investigate-row {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  gap: 0 !important;
+  flex-wrap: nowrap !important;
+  min-height: calc(100vh - 112px) !important;
+}
+
+/* ls-page fallback (keep for compatibility) */
+.ls-page {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 24px 28px !important;
+  min-height: calc(100vh - 112px) !important;
+  background: var(--ls-bg) !important;
+  box-sizing: border-box !important;
+}
+
+/* ── Notice / info box used on KB, Status tabs ── */
+.ls-notice {
+  padding: 13px 16px;
+  border-radius: 8px;
+  background: var(--ls-surface);
+  border: 1px solid var(--ls-border);
+  color: var(--ls-text2);
+  font-size: 0.87em;
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+.ls-notice strong { color: var(--ls-text); }
+
+/* ── Section card — box used throughout KB/Status ── */
+.ls-card {
+  background: var(--ls-surface);
+  border: 1px solid var(--ls-border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+/* ── Secondary button ── */
+.ls-btn-secondary button {
+  background: var(--ls-surface) !important;
+  color: var(--ls-text) !important;
+  border: 1.5px solid var(--ls-border2) !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  transition: all 0.2s !important;
+}
+.ls-btn-secondary button:hover {
+  border-color: var(--ls-orange) !important;
+  color: var(--ls-orange) !important;
+}
+
+/* ── Refresh/small button ── */
+.ls-btn-small button {
+  background: var(--ls-surface2) !important;
+  color: var(--ls-text2) !important;
+  border: 1px solid var(--ls-border) !important;
+  border-radius: 6px !important;
+  font-size: 0.82em !important;
+  font-weight: 500 !important;
+}
+.ls-btn-small button:hover {
+  border-color: var(--ls-orange) !important;
+  color: var(--ls-orange) !important;
+}
+
+/* ── History wrap ── */
+.ls-history-wrap {
+  background: var(--ls-surface2);
+  border: 1px solid var(--ls-border);
+  border-radius: 10px;
+  padding: 10px 10px 4px;
+  margin-top: 2px;
+}
+#history-target,
+#history-load-btn {
+  display: none !important;
+}
+
+/* ── Misc ── */
+.progress-bar { background: var(--ls-orange) !important; }
+.generating { border-color: var(--ls-orange) !important; }
+.gradio-checkbox input[type=checkbox]:checked { accent-color: var(--ls-orange) !important; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--ls-border2); border-radius: 10px; }
+
+/* ── Placeholder ── */
+.ls-placeholder {
+  display: flex !important; flex-direction: column !important;
+  align-items: center !important; justify-content: center !important;
+  min-height: 400px !important; gap: 14px !important; text-align: center !important;
+}
+.ls-placeholder-icon {
+  width: 72px; height: 72px; border: 2px dashed var(--ls-border2); border-radius: 20px;
+  display: flex; align-items: center; justify-content: center; font-size: 30px; color: var(--ls-text3);
+}
+
+/* ── LIGHT MODE extra warmth ── */
+.light body          { background: #e8e4de !important; }
+.light .ls-topbar      { background: #FFFAF6; border-bottom-color: #EAD8C4; }
+.light .tab-nav        { background: #FFFAF6 !important; border-bottom-color: #EAD8C4 !important; }
+.light .ls-left        { background: #FFFAF6 !important; border-right-color: #EAD8C4 !important; }
+.light .ls-card        { background: #FFFCF9; border-color: #EAD8C4; }
+.light .ls-notice      { background: #FFFCF9; border-color: #EAD8C4; }
+.light .ls-history-wrap{ background: #FFF8F2; border-color: #EAD8C4; }
+.light .gradio-accordion { background: #FFF8F2 !important; border-color: #EAD8C4 !important; }
+.light .gradio-file,
+.light .gradio-video   { background: #FFF8F3 !important; border-color: #D9C4AE !important; }
+.light .gradio-code    { background: #FFF8F3 !important; border-color: #EAD8C4 !important; }
+.light .ls-page        { background: #FDF8F3; }
+.light #run-btn        { box-shadow: 0 4px 20px rgba(245,98,58,0.28) !important; }
+.light .gradio-container { border-color: #D9CCBE !important; }
 """
 
 PLACEHOLDER = """
-<div class="placeholder-box">
-  <div style="font-size:3em;margin-bottom:16px">🔬</div>
-  <h2 style="color:#f1f5f9;font-size:1.6em;margin:0 0 10px;font-weight:700">Ready to Investigate</h2>
-  <p style="max-width:420px;margin:0 auto 24px;line-height:1.7;color:#94a3b8">
-    Upload your <strong style="color:#e2e8f0">lab manual</strong> and provide an
-    <strong style="color:#e2e8f0">incident video</strong>, then click
-    <em style="color:#60a5fa">Run Investigation</em>.
-  </p>
-  <div style="display:inline-flex;gap:10px;flex-wrap:wrap;justify-content:center;
-              background:#0f172a;border-radius:12px;padding:14px 20px;border:1px solid #334155;font-size:0.85em;color:#94a3b8">
-    <span>📋 Upload lab manual</span>
-    <span style="color:#334155">│</span>
-    <span>🎬 Upload video or paste URL</span>
-    <span style="color:#334155">│</span>
-    <span>🚀 Click Run</span>
+<div style="
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:380px;gap:16px;text-align:center;padding:32px 24px;
+  background:var(--ls-surface);border-radius:12px;border:1px solid var(--ls-border);
+  margin:4px 0;
+">
+  <div style="
+    width:64px;height:64px;background:var(--ls-surface2);border-radius:16px;
+    display:flex;align-items:center;justify-content:center;font-size:28px;
+    border:1.5px dashed var(--ls-border2);
+  ">🔬</div>
+
+  <div>
+    <h2 style="color:var(--ls-text);font-size:1.2em;font-weight:800;margin:0 0 8px;letter-spacing:-0.3px">
+      Ready to Investigate
+    </h2>
+    <p style="color:var(--ls-text2);font-size:0.84em;margin:0;line-height:1.7;max-width:320px">
+      Upload your <strong style="color:var(--ls-text)">lab manual</strong> on the left,
+      provide an <strong style="color:var(--ls-text)">incident video</strong>,
+      then click <strong style="color:var(--ls-orange)">Run Investigation</strong>.
+    </p>
   </div>
-  <p style="margin:18px 0 0;font-size:0.8em;color:#475569">
-    Works with any lab type · Any video length · No hardcoded rules · 100% dynamic analysis
+
+  <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px">
+    <span style="padding:6px 14px;border-radius:20px;border:1px solid var(--ls-border);font-size:0.75em;color:var(--ls-text2);background:var(--ls-surface2)">
+      <span style="color:var(--ls-orange);font-weight:700">1</span> &nbsp;Upload manual
+    </span>
+    <span style="padding:6px 14px;border-radius:20px;border:1px solid var(--ls-border);font-size:0.75em;color:var(--ls-text2);background:var(--ls-surface2)">
+      <span style="color:var(--ls-orange);font-weight:700">2</span> &nbsp;Add video
+    </span>
+    <span style="padding:6px 14px;border-radius:20px;border:1px solid var(--ls-border);font-size:0.75em;color:var(--ls-text2);background:var(--ls-surface2)">
+      <span style="color:var(--ls-orange);font-weight:700">3</span> &nbsp;Run
+    </span>
+    <span style="padding:6px 14px;border-radius:20px;border:1px solid var(--ls-border);font-size:0.75em;color:var(--ls-text2);background:var(--ls-surface2)">
+      <span style="color:var(--ls-orange);font-weight:700">4</span> &nbsp;Download PDF
+    </span>
+  </div>
+
+  <div style="
+    margin-top:8px;padding:14px 20px;background:var(--ls-surface2);
+    border-radius:10px;border:1px solid var(--ls-border);width:100%;max-width:400px;
+  ">
+    <div style="font-size:0.72em;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--ls-text3);margin-bottom:10px">What gets detected</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;text-align:left">
+      <div style="font-size:0.78em;color:var(--ls-text2)">⚠️ PPE violations</div>
+      <div style="font-size:0.78em;color:var(--ls-text2)">🧪 Chemical handling</div>
+      <div style="font-size:0.78em;color:var(--ls-text2)">🔬 Equipment misuse</div>
+      <div style="font-size:0.78em;color:var(--ls-text2)">🚨 Fire hazards</div>
+      <div style="font-size:0.78em;color:var(--ls-text2)">🗑️ Waste disposal</div>
+      <div style="font-size:0.78em;color:var(--ls-text2)">🚪 Emergency exits</div>
+    </div>
+  </div>
+
+  <p style="font-size:0.72em;color:var(--ls-text3);margin:0">
+    Any lab type · Any video length · Exact timestamps · Rule citation from your manual
   </p>
 </div>"""
 
-# ── Build UI ──────────────────────────────────────────────────────────────────
+TOPBAR_HTML = """
+<div class="ls-topbar" id="ls-topbar">
+  <div class="ls-logo">
+    <div class="ls-logo-icon">🔬</div>
+    Lab<span>Sentinel</span>-RAG
+  </div>
+  <div class="ls-topbar-right">
+    <div class="ls-chip" id="api-chip">
+      <div class="ls-dot"></div>
+      <span id="api-label">Gemini · auto-rotation ON</span>
+    </div>
+    <button id="theme-toggle" title="Toggle dark/light mode">🌙</button>
+  </div>
+</div>
+"""
+
+THEME_JS = """
+function lsInit() {
+  // Apply saved theme on load
+  var saved = localStorage.getItem('ls-theme') || 'dark';
+  document.documentElement.classList.add(saved);
+  document.body.classList.add(saved);
+  var btn = document.getElementById('theme-toggle');
+  if (btn) {
+    btn.textContent = saved === 'dark' ? '🌙' : '☀️';
+    btn.onclick = function() {
+      var html = document.documentElement;
+      var body = document.body;
+      if (html.classList.contains('dark')) {
+        html.classList.replace('dark','light');
+        body.classList.replace('dark','light');
+        btn.textContent = '☀️';
+        localStorage.setItem('ls-theme','light');
+      } else {
+        html.classList.replace('light','dark');
+        body.classList.replace('light','dark');
+        btn.textContent = '🌙';
+        localStorage.setItem('ls-theme','dark');
+      }
+    };
+  }
+}
+"""
+
+HEAD_INJECT = """
+<script>
+function lsCenter() {
+  // Body has inline styles set by Gradio — override them directly
+  document.body.style.cssText = [
+    'width: 100%',
+    'margin: 0',
+    'padding: 20px 0',
+    'display: flex',
+    'flex-direction: column',
+    'align-items: center',
+    'min-height: 100vh',
+    'background: #1a1a1a',
+    'box-sizing: border-box'
+  ].join(' !important;') + ' !important';
+
+  // gradio-app element — constrain its width and centre it
+  var ga = document.querySelector('gradio-app');
+  if (ga) {
+    ga.style.cssText = [
+      'display: block',
+      'width: min(1200px, calc(100vw - 28px))',
+      'max-width: calc(100vw - 28px)',
+      'margin: 0 auto'
+    ].join(' !important;') + ' !important';
+  }
+
+  // Also fix tab panels inside shadow root
+  var root = (ga && ga.shadowRoot) ? ga.shadowRoot : ga || document;
+  root.querySelectorAll('[role="tabpanel"]').forEach(function(el) {
+    el.style.setProperty('padding', '0', 'important');
+    el.style.setProperty('width', '100%', 'important');
+    el.style.setProperty('min-width', '100%', 'important');
+    el.style.setProperty('box-sizing', 'border-box', 'important');
+    Array.from(el.children).forEach(function(c) {
+      c.style.setProperty('width', '100%', 'important');
+      c.style.setProperty('min-width', '100%', 'important');
+      c.style.setProperty('box-sizing', 'border-box', 'important');
+    });
+  });
+}
+
+[50, 200, 600, 1500].forEach(function(ms) { setTimeout(lsCenter, ms); });
+document.addEventListener('click', function(e) {
+  const card = e.target && e.target.closest ? e.target.closest('[data-history-id]') : null;
+  if (card) {
+    const reportPath = card.getAttribute('data-history-id');
+    if (reportPath) {
+      const target = document.getElementById('history-target');
+      const input = target ? target.querySelector('input, textarea') : null;
+      if (input) {
+        input.value = reportPath;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const btn = document.getElementById('history-load-btn');
+      if (btn) {
+        btn.click();
+      }
+    }
+  }
+  if (e.target && e.target.getAttribute('role') === 'tab') {
+    setTimeout(lsCenter, 100);
+  }
+}, true);
+</script>
+"""
+
+# ── Build App ─────────────────────────────────────────────────────────────────
+
+
 
 def create_app():
-    with gr.Blocks(title="LabSentinel-RAG") as app:
+    with gr.Blocks(
+        title       = "LabSentinel-RAG",
+        fill_height = True,
+        fill_width  = True,
+    ) as app:
+        gr.HTML(TOPBAR_HTML)
 
-        # Hero
-        gr.HTML(f"""
-        <div class="hero">
-          <h1>🔬 LabSentinel-RAG</h1>
-          <p>AI-powered laboratory safety incident investigation. Upload any lab manual + any video → instant violation report.</p>
-          <span class="pill">Gemini Vision</span>
-          <span class="pill">RAG Retrieval</span>
-          <span class="pill">Any Lab Type</span>
-          <span class="pill">Hours-long Video</span>
-          <span class="pill">Exact Timestamps</span>
-        </div>
-        """)
+        with gr.Tabs(elem_classes="tab-nav", elem_id="main-tabs"):
 
-        with gr.Tabs(elem_classes="tab-nav"):
-
-            # ── INVESTIGATE ────────────────────────────────────────────────────
-            with gr.TabItem("🔍  Investigate"):
-                with gr.Row(equal_height=False, variant="panel"):
-
-                    # Left panel
-                    with gr.Column(scale=5, min_width=360):
-                        gr.HTML('<div class="panel"><p class="panel-title">Step 1 — Lab Manual (Optional)</p>')
-                        manual_in = gr.File(
-                            label="Upload Lab Manual / SOP / Safety Guidelines",
-                            file_count="multiple",
-                            file_types=[".pdf", ".docx", ".txt", ".md"],
-                        )
-                        gr.HTML(
-                            '<p style="color:#64748b;font-size:0.8em;margin:6px 0 0">'
-                            'PDF, DOCX or TXT. The AI reads it and applies its specific rules to the video. '
-                            'Without a manual, universal safety rules are used.</p></div>'
-                        )
-
-                        gr.HTML('<div class="panel"><p class="panel-title">Step 2 — Incident Video</p>')
-                        video_in = gr.Video(label="Upload Video File", height=200)
-                        url_in   = gr.Textbox(
-                            label="Or paste a video URL (YouTube, direct MP4, etc.)",
-                            placeholder="https://www.youtube.com/watch?v=saXFQR86ziM",
-                            lines=1,
-                        )
-                        gr.HTML(
-                            '<p style="color:#64748b;font-size:0.8em;margin:6px 0 0">'
-                            '⚡ Downloaded videos are cached — re-running the same URL is instant.</p></div>'
-                        )
-
+            # ── INVESTIGATE ────────────────────────────────────────────────
+            with gr.TabItem("🔍  Investigate", elem_id="tab-investigate"):
+                with gr.Row(equal_height=False, elem_id="investigate-row"):
+                    with gr.Column(scale=4, min_width=320, elem_classes="ls-left"):
+                        gr.HTML('<span class="ls-section-label">Step 1 — Lab Manual</span>')
+                        manual_in = gr.File(label="Upload Lab Manual / SOP", file_count="multiple",
+                                            file_types=[".pdf",".docx",".txt",".md"])
+                        gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:4px 0 14px;line-height:1.5">'
+                                'PDF · DOCX · TXT. The AI reads it and applies its rules. No manual = universal rules.</p>')
+                        gr.HTML('<span class="ls-section-label">Step 2 — Incident Video</span>')
+                        video_in = gr.Video(label="Upload Video", height=190)
+                        url_in   = gr.Textbox(label="Or paste a URL",
+                                              placeholder="https://youtube.com/watch?v=...", lines=1)
+                        gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:4px 0 14px;line-height:1.5">'
+                                '⚡ Same URL cached — re-runs are instant.</p>')
                         with gr.Accordion("⚙  Advanced Settings", open=False):
-                            gr.HTML('<p style="color:#64748b;font-size:0.8em;margin:0 0 10px">Leave at 0 to use defaults from .env</p>')
+                            gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:0 0 10px">Leave 0 for .env defaults</p>')
                             with gr.Row():
-                                sr_in = gr.Number(label="Frame rate (s)", value=0, minimum=0, maximum=60, precision=0,
-                                                  info="1 frame every N seconds")
-                                mf_in = gr.Number(label="Max frames", value=0, minimum=0, maximum=500, precision=0,
-                                                  info="Total frame cap")
-                            chunk_in = gr.Number(label="Chunk size (s)", value=0, minimum=0, maximum=7200, precision=0,
-                                                 info="Seconds per chunk for long videos")
-
+                                sr_in = gr.Number(label="Frame rate (s)", value=0, minimum=0, maximum=60, precision=0)
+                                mf_in = gr.Number(label="Max frames", value=0, minimum=0, maximum=500, precision=0)
+                            chunk_in = gr.Number(label="Chunk size (s)", value=0, minimum=0, maximum=7200, precision=0)
                         run_btn    = gr.Button("🚀  Run Investigation", variant="primary", size="lg", elem_id="run-btn")
                         status_out = gr.HTML(value='<div style="height:36px"></div>')
+                        gr.HTML('<div style="margin-top:16px"><span class="ls-section-label">Recent Investigations</span></div>')
+                        history_out = gr.HTML(value=_load_history(5), elem_classes="ls-history-wrap")
 
-                    # Right panel
-                    with gr.Column(scale=7, min_width=500):
-                        summary_out = gr.Markdown(visible=True)
+                    with gr.Column(scale=7, min_width=500, elem_classes="ls-right"):
+                        summary_out = gr.Markdown()
                         report_html = gr.HTML(value=PLACEHOLDER)
 
-                # Bottom row
+                history_target = gr.Textbox(value="", elem_id="history-target")
+                history_load = gr.Button("Load history", elem_id="history-load-btn")
+
                 with gr.Row():
                     with gr.Column(scale=1, min_width=200):
-                        pdf_out = gr.File(label="📥 Download PDF Report", elem_classes="pdf-download")
+                        pdf_out = gr.File(label="📥 Download PDF Report", elem_classes="pdf-btn")
                     with gr.Column(scale=4):
-                        with gr.Accordion("📄 Raw JSON Report", open=False):
+                        with gr.Accordion("{ }  Raw JSON Report", open=False):
                             json_out = gr.Code(language="json")
 
                 run_btn.click(
                     fn=investigate,
                     inputs=[video_in, url_in, manual_in, sr_in, mf_in, chunk_in],
-                    outputs=[report_html, json_out, pdf_out, status_out, summary_out],
+                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out],
+                )
+                history_load.click(
+                    fn=_load_history_report,
+                    inputs=[history_target],
+                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out],
                 )
 
-            # ── BUILD KB ───────────────────────────────────────────────────────
-            with gr.TabItem("📚  Knowledge Base"):
-                gr.HTML('<div class="panel"><p style="color:#94a3b8;margin:0"><strong style="color:#e2e8f0">Optional:</strong> Index your SOPs and historical incident records for deeper retrieval. The investigation works without this, but indexing improves rule citation accuracy.</p></div>')
-                with gr.Row():
-                    with gr.Column():
-                        gr.HTML('<p class="panel-title" style="color:#64748b;font-size:0.75em;font-weight:700;letter-spacing:1px;text-transform:uppercase">Upload Documents</p>')
-                        kb_sop = gr.File(label="Safety SOPs", file_count="multiple", file_types=[".pdf",".docx",".txt",".md"])
-                        kb_man = gr.File(label="Equipment Manuals", file_count="multiple", file_types=[".pdf",".docx",".txt"])
-                        kb_inc = gr.File(label="Incident Records", file_count="multiple", file_types=[".json",".txt",".pdf"])
-                    with gr.Column():
-                        gr.HTML('<p class="panel-title" style="color:#64748b;font-size:0.75em;font-weight:700;letter-spacing:1px;text-transform:uppercase">Or Point to Folders</p>')
-                        kb_sd = gr.Textbox(label="SOP folder path", placeholder="/path/to/sops")
-                        kb_md = gr.Textbox(label="Manuals folder path", placeholder="/path/to/manuals")
-                        kb_id = gr.Textbox(label="Incidents folder path", placeholder="/path/to/incidents")
-                        kb_reset = gr.Checkbox(label="Reset index before building", value=False)
-                kb_btn = gr.Button("⚙  Build / Update Knowledge Base", variant="secondary", size="lg")
-                kb_out = gr.Markdown()
-                kb_btn.click(fn=build_kb,
-                             inputs=[kb_sop, kb_man, kb_inc, kb_sd, kb_md, kb_id, kb_reset],
-                             outputs=[kb_out])
+            # ── KNOWLEDGE BASE ─────────────────────────────────────────────
+            with gr.TabItem("📚  Knowledge Base", elem_id="tab-kb"):
+                with gr.Column(elem_id="kb-page"):
+                    gr.HTML('<div class="ls-notice"><strong>Optional</strong> — Index your SOPs and incident records '
+                            'for deeper rule retrieval. Works without this, but improves citation accuracy.</div>')
+                    with gr.Row(equal_height=False):
+                        with gr.Column():
+                            gr.HTML('<span class="ls-section-label">Upload Documents</span>')
+                            kb_sop = gr.File(label="Safety SOPs", file_count="multiple",
+                                             file_types=[".pdf",".docx",".txt",".md"])
+                            kb_man = gr.File(label="Equipment Manuals", file_count="multiple",
+                                             file_types=[".pdf",".docx",".txt"])
+                            kb_inc = gr.File(label="Incident Records", file_count="multiple",
+                                             file_types=[".json",".txt",".pdf"])
+                        with gr.Column():
+                            gr.HTML('<span class="ls-section-label">Or Point to Folders on Disk</span>')
+                            kb_sd = gr.Textbox(label="SOP folder path", placeholder="/path/to/sops")
+                            kb_md = gr.Textbox(label="Manuals folder path", placeholder="/path/to/manuals")
+                            kb_id = gr.Textbox(label="Incidents folder path", placeholder="/path/to/incidents")
+                            kb_reset = gr.Checkbox(label="Reset index before building", value=False)
+                    kb_btn = gr.Button("⚙  Build / Update Knowledge Base", variant="secondary",
+                                       size="lg", elem_classes="ls-btn-secondary")
+                    kb_out = gr.Markdown()
+                    kb_btn.click(fn=build_kb,
+                                 inputs=[kb_sop, kb_man, kb_inc, kb_sd, kb_md, kb_id, kb_reset],
+                                 outputs=[kb_out])
 
-            # ── STATUS ─────────────────────────────────────────────────────────
-            with gr.TabItem("📊  Status"):
-                gr.HTML('<div class="panel"><p style="color:#94a3b8;margin:0">Live system health and active configuration.</p></div>')
-                st_out = gr.Markdown()
-                gr.Button("🔄  Refresh", size="sm").click(fn=get_status, outputs=st_out)
-                app.load(fn=get_status, outputs=st_out)
+            # ── STATUS ─────────────────────────────────────────────────────
+            with gr.TabItem("📊  Status", elem_id="tab-status"):
+                with gr.Column(elem_id="status-page"):
+                    st_out = gr.HTML()
+                    gr.Button("🔄  Refresh", size="sm", elem_classes="ls-btn-small").click(
+                        fn=get_status, outputs=st_out)
+                    app.load(fn=get_status, outputs=st_out)
 
-            # ── HOW IT WORKS ───────────────────────────────────────────────────
-            with gr.TabItem("ℹ  How It Works"):
-                gr.Markdown("""
-## How LabSentinel-RAG Works
-
-**Fully dynamic** — no hardcoded rules. Every finding comes from your uploaded manual and what the AI sees in your video.
-
-### Five-Stage Pipeline
-
-| Stage | What Happens |
-|-------|-------------|
-| **1. Input** | Upload lab manual (PDF/DOCX/TXT) + incident video |
-| **2. Video Analysis** | Gemini Vision reads every sampled frame against your manual using a structured checklist |
-| **3. RAG Retrieval** | Retrieves the most relevant passages from your manual for each detected event |
-| **4. LLM Reasoning** | Confirms violations, cites the exact rule, gives corrective actions |
-| **5. Report** | Timestamped HTML + PDF report with every violation linked to its video frame |
-
-### Key Features
-- **Exact timestamps** — every finding shows the precise second in the video
-- **Rule citation** — quotes the exact section from your manual, or states "Universal principle" if not covered
-- **Cross-lab** — upload a chemistry manual → chemistry rules applied; biology manual → biology rules
-- **Long videos** — processes hours of CCTV footage automatically in chunks
-- **Download cache** — YouTube videos cached locally so re-running the same URL is instant
-
-### Supported Inputs
-- **Manuals**: PDF, DOCX, TXT — any lab type
-- **Videos**: MP4, AVI, MOV, MKV, WebM, YouTube URLs, direct MP4 links
-                """)
+            # ── HOW IT WORKS ───────────────────────────────────────────────
+            with gr.TabItem("ℹ  How It Works", elem_id="tab-how"):
+                with gr.Column(elem_id="how-page"):
+                    gr.HTML("""
+<div style="font-family:Inter,sans-serif;max-width:860px">
+  <h2 style="color:var(--ls-text);font-size:1.4em;font-weight:800;margin:0 0 8px;letter-spacing:-0.4px">How LabSentinel-RAG Works</h2>
+  <p style="color:var(--ls-text2);margin:0 0 24px;line-height:1.7;font-size:0.9em">
+    <strong style="color:var(--ls-text)">Fully dynamic — no hardcoded rules.</strong>
+    Every finding comes from your uploaded manual and what the AI sees in your video.
+  </p>
+  <h3 style="color:var(--ls-text);font-size:0.88em;font-weight:700;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.8px">Five-Stage Pipeline</h3>
+  <table style="width:100%;border-collapse:collapse;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:10px;overflow:hidden;margin-bottom:24px">
+    <tr><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);width:160px;font-weight:600;color:var(--ls-orange);font-size:0.85em">1. Input</td><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);font-size:0.85em">Upload lab manual (PDF/DOCX/TXT) and incident video (any length)</td></tr>
+    <tr><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);font-weight:600;color:var(--ls-orange);font-size:0.85em">2. Video Analysis</td><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);font-size:0.85em">Gemini Vision reads every frame with a structured PPE and hazard checklist</td></tr>
+    <tr><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);font-weight:600;color:var(--ls-orange);font-size:0.85em">3. RAG Retrieval</td><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);font-size:0.85em">Retrieves relevant passages from your manual for each detected event</td></tr>
+    <tr><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);font-weight:600;color:var(--ls-orange);font-size:0.85em">4. LLM Reasoning</td><td style="padding:10px 16px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);font-size:0.85em">Confirms violations, cites the exact rule, gives corrective actions</td></tr>
+    <tr><td style="padding:10px 16px;font-weight:600;color:var(--ls-orange);font-size:0.85em">5. Report</td><td style="padding:10px 16px;color:var(--ls-text2);font-size:0.85em">Timestamped HTML and PDF report — every violation linked to exact video time</td></tr>
+  </table>
+  <h3 style="color:var(--ls-text);font-size:0.88em;font-weight:700;margin:0 0 12px;text-transform:uppercase;letter-spacing:0.8px">Key Features</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:24px">
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Exact Timestamps</div><div style="font-size:0.78em;color:var(--ls-text2)">MM:SS or H:MM:SS matching video duration</div></div>
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Rule Citation</div><div style="font-size:0.78em;color:var(--ls-text2)">Quotes exact section from your manual</div></div>
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Any Lab Type</div><div style="font-size:0.78em;color:var(--ls-text2)">Chemistry, biology, cleanroom, hospital</div></div>
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Long Videos</div><div style="font-size:0.78em;color:var(--ls-text2)">Hours of CCTV in chunks automatically</div></div>
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Multi-Key Rotation</div><div style="font-size:0.78em;color:var(--ls-text2)">Unlimited Gemini keys, auto-rotates</div></div>
+    <div style="padding:12px 14px;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:8px"><div style="font-size:0.82em;font-weight:600;color:var(--ls-text);margin-bottom:3px">Download Cache</div><div style="font-size:0.78em;color:var(--ls-text2)">Same URL re-runs are instant</div></div>
+  </div>
+  <h3 style="color:var(--ls-text);font-size:0.88em;font-weight:700;margin:0 0 10px;text-transform:uppercase;letter-spacing:0.8px">Free Tier (Gemini)</h3>
+  <table style="border-collapse:collapse;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:10px;overflow:hidden">
+    <tr style="background:var(--ls-surface2)"><td style="padding:8px 20px;font-weight:600;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">Keys</td><td style="padding:8px 20px;font-weight:600;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">Requests/day</td><td style="padding:8px 20px;font-weight:600;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">Investigations/day</td></tr>
+    <tr><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">1</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">~20</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">~1</td></tr>
+    <tr><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">4</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">~80</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2);border-bottom:1px solid var(--ls-border)">~5</td></tr>
+    <tr><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2)">10</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2)">~200</td><td style="padding:8px 20px;font-size:0.82em;color:var(--ls-text2)">~12</td></tr>
+  </table>
+  <p style="color:var(--ls-text3);font-size:0.78em;margin:10px 0 0">Add to .env: GOOGLE_API_KEY_2=... GOOGLE_API_KEY_3=... (unlimited keys supported)</p>
+</div>""")
 
     return app
 
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port  = int(os.getenv("GRADIO_PORT", "7860"))
@@ -551,10 +1207,13 @@ if __name__ == "__main__":
         max_file_size = None,
         show_error    = True,
         css           = CSS,
+        js            = THEME_JS,
+        head          = HEAD_INJECT,
         theme         = gr.themes.Base(
-            primary_hue   = gr.themes.colors.blue,
-            secondary_hue = gr.themes.colors.slate,
-            neutral_hue   = gr.themes.colors.slate,
+            primary_hue   = gr.themes.colors.orange,
+            secondary_hue = gr.themes.colors.stone,
+            neutral_hue   = gr.themes.colors.stone,
             font          = [gr.themes.GoogleFont("Inter"), "ui-sans-serif"],
         ),
     )
+
