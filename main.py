@@ -58,18 +58,13 @@ def build_kb(
     """
     from src.ingestion.knowledge_base_builder import KnowledgeBaseBuilder
     from src.ingestion.document_loader import DocumentLoader
-    import config.settings as cfg
 
-    # Apply directory overrides directly to the module-level variables
-    if sop_dir:
-        cfg.SOP_DIR = Path(sop_dir)
-        console.print(f"  SOP dir   : {cfg.SOP_DIR}")
-    if manual_dir:
-        cfg.MANUAL_DIR = Path(manual_dir)
-        console.print(f"  Manual dir: {cfg.MANUAL_DIR}")
-    if incident_dir:
-        cfg.INCIDENT_DIR = Path(incident_dir)
-        console.print(f"  Incident dir: {cfg.INCIDENT_DIR}")
+    for label, d in (("SOP dir", sop_dir), ("Manual dir", manual_dir), ("Incident dir", incident_dir)):
+        if d:
+            if not Path(d).is_dir():
+                console.print(f"[red]{label} not found:[/red] {d}")
+                raise typer.Exit(1)
+            console.print(f"  {label:12s}: {d}")
 
     builder = KnowledgeBaseBuilder()
 
@@ -79,7 +74,7 @@ def build_kb(
 
     console.print("\n[bold blue]Building LabSentinel-RAG Knowledge Base…[/bold blue]")
     loader = DocumentLoader()
-    chunks = loader.load_all()
+    chunks = loader.load_all(sop_dir=sop_dir, manual_dir=manual_dir, incident_dir=incident_dir)
 
     if not chunks:
         console.print(
@@ -105,6 +100,11 @@ def build_kb(
 @app.command()
 def investigate(
     video: str = typer.Argument(..., help="Path to the incident video file"),
+    manual: list[str] = typer.Option(
+        None, "--manual", "-m",
+        help="Lab manual / SOP file(s) (PDF/DOCX/TXT). Repeat for several. "
+             "Omit to apply universal safety rules.",
+    ),
     report_id: str = typer.Option(
         None, "--report-id",
         help="Custom report identifier (auto-generated if omitted)",
@@ -128,11 +128,11 @@ def investigate(
     Run the full LabSentinel-RAG investigation on an incident video.
 
     Requires:
-      1. OPENAI_API_KEY set in your .env file
-      2. Knowledge base built (run `python main.py build-kb` first)
+      1. GOOGLE_API_KEY (Gemini, free) or OPENAI_API_KEY in your .env file
+      2. Optional: knowledge base built (`python main.py build-kb`)
 
     Example:
-      python main.py investigate data/videos/incident.mp4
+      python main.py investigate data/videos/incident.mp4 --manual my_lab_manual.pdf
       python main.py investigate /path/to/video.mp4 --output-dir /my/reports
     """
     from src.pipeline import LabSentinelPipeline
@@ -142,12 +142,31 @@ def investigate(
         console.print(f"[red]Video not found:[/red] {video}")
         raise typer.Exit(1)
 
-    if not settings.llm.api_key:
+    if not settings.llm.is_configured():
         console.print(
-            "[red]OpenAI API key missing.[/red] "
-            "Set OPENAI_API_KEY in your .env file."
+            "[red]No API key configured.[/red] "
+            "Set GOOGLE_API_KEY (free: https://aistudio.google.com/apikey) "
+            "or OPENAI_API_KEY in your .env file."
         )
         raise typer.Exit(1)
+
+    manual_text = ""
+    if manual:
+        from src.ingestion.document_loader import extract_text
+        parts = []
+        for m in manual:
+            if not Path(m).exists():
+                console.print(f"[red]Manual not found:[/red] {m}")
+                raise typer.Exit(1)
+            t = extract_text(m)
+            if not t.strip():
+                console.print(f"[yellow]Warning: no text extracted from {m}[/yellow]")
+                continue
+            parts.append(f"=== {Path(m).name} ===\n{t}")
+        manual_text = "\n\n".join(parts)
+        console.print(f"  Manual: {len(parts)} file(s), {len(manual_text):,} chars")
+    else:
+        console.print("  [dim]No manual given — universal safety rules will be applied[/dim]")
 
     # Apply format overrides
     if no_pdf and "pdf" in settings.report.output_format:
@@ -158,6 +177,7 @@ def investigate(
     pipeline = LabSentinelPipeline()
     report = pipeline.run(
         video_path  = video,
+        manual_text = manual_text,
         report_id   = report_id,
         output_dir  = output_dir,
         sample_rate = sample_rate,
@@ -169,7 +189,8 @@ def investigate(
         Panel(
             f"[bold]Violations  :[/bold] {report.total_violations}\n"
             f"[bold]Risk Level  :[/bold] {report.overall_risk_level.upper()}\n"
-            f"[bold]Events Found:[/bold] {len(report.timeline)}",
+            f"[bold]Events Found:[/bold] {len(report.timeline)}"
+            + "".join(f"\n[yellow]⚠ {w}[/yellow]" for w in report.metadata.get("warnings", [])),
             title="Investigation Summary",
             border_style="green",
         )
@@ -233,13 +254,12 @@ def demo(
     Open http://localhost:7860 in your browser after running.
     """
     try:
-        from app import create_demo
-        ui = create_demo()
-        ui.launch(server_port=port, share=share, server_name="0.0.0.0")
-    except ImportError as e:
-        console.print(f"[red]Cannot launch UI:[/red] {e}")
-        console.print("Install: pip install gradio")
+        import gradio  # noqa: F401
+    except ImportError:
+        console.print("[red]Gradio is not installed.[/red] Install: pip install gradio")
         raise typer.Exit(1)
+    from app import launch
+    launch(port=port, share=share)
 
 
 if __name__ == "__main__":

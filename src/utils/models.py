@@ -3,7 +3,7 @@ Pydantic data models shared across all LabSentinel-RAG modules.
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -31,7 +31,8 @@ class VideoAnalysisResult(BaseModel):
     total_frames_sampled: int
     events: list[DetectedEvent] = Field(default_factory=list)
     summary: str = ""
-    analysis_timestamp: datetime = Field(default_factory=datetime.utcnow)
+    failed_frames: int = 0     # frames the VLM could not analyse (API error / unparseable reply)
+    analysis_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ── Knowledge Base Models ─────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ class Violation(BaseModel):
 class InvestigationReport(BaseModel):
     """Complete investigation report — the final output of LabSentinel-RAG."""
     report_id: str
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     video_path: str
     incident_summary: str
     timeline: list[DetectedEvent]

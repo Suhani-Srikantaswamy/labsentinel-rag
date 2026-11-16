@@ -8,6 +8,7 @@ Generates the final investigation report in three formats:
 """
 
 from __future__ import annotations
+import html as _html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,18 @@ from loguru import logger
 from config.settings import settings, OUTPUT_DIR
 from src.utils.models import InvestigationReport, Violation
 from src.utils.time_utils import format_human_time
+
+
+def _e(value) -> str:
+    """Escape model/user text for HTML and for reportlab's mini-markup."""
+    return _html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _file_stem(report_id: str) -> str:
+    """Safe, short filename stem (keeps the historical 8-char uuid prefix)."""
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(report_id))[:40] or "report"
+    return f"report_{safe[:8] if len(safe) == 36 else safe}"
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -52,7 +65,7 @@ class ReportGenerator:
     # ── JSON ──────────────────────────────────────────────────────────────────
 
     def to_json(self, report: InvestigationReport) -> str:
-        path = self.output_dir / f"report_{report.report_id[:8]}.json"
+        path = self.output_dir / f"{_file_stem(report.report_id)}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report.model_dump(mode="json"), f, indent=2, default=str)
         logger.info(f"JSON report saved: {path}")
@@ -61,7 +74,7 @@ class ReportGenerator:
     # ── HTML ──────────────────────────────────────────────────────────────────
 
     def to_html(self, report: InvestigationReport) -> str:
-        path = self.output_dir / f"report_{report.report_id[:8]}.html"
+        path = self.output_dir / f"{_file_stem(report.report_id)}.html"
         html = self._render_html(report)
         path.write_text(html, encoding="utf-8")
         logger.info(f"HTML report saved: {path}")
@@ -81,38 +94,38 @@ class ReportGenerator:
             timeline_rows = '<tr><td colspan="4" style="padding:12px;text-align:center;color:#64748b;font-style:italic">No violations detected in timeline</td></tr>'
         for e in violation_events:
             badge_color = risk_colors.get(e.severity, "#475569")
-            objects_str = ", ".join(e.objects_involved[:4]) if e.objects_involved else "—"
+            objects_str = _e(", ".join(e.objects_involved[:4])) if e.objects_involved else "—"
             # Show the violation hint if available
-            desc = e.description
+            desc = _e(e.description)
             timeline_rows += f"""
             <tr>
               <td style="white-space:nowrap;color:#FF7A59;font-weight:700;font-family:monospace">{_fmt_ts(e.timestamp_sec)}</td>
               <td>{desc}</td>
               <td style="color:#64748b;font-size:0.85em">{objects_str}</td>
-              <td><span class="badge" style="background:{badge_color}">{e.severity.upper()}</span></td>
+              <td><span class="badge" style="background:{badge_color}">{_e(e.severity.upper())}</span></td>
             </tr>"""
 
         # Violation cards
         violation_cards = ""
         warnings_html = ""
         for warning in report.metadata.get("warnings", []) or []:
-            warnings_html += f'<div class="warning-banner">⚠ {warning}</div>'
+            warnings_html += f'<div class="warning-banner">⚠ {_e(warning)}</div>'
 
         for v in report.violations:
             sop_quotes = ""
             for ev in v.sop_evidence[:2]:
                 sop_quotes += f"""
                 <div class="evidence-box">
-                  <strong>{ev.chunk.title}</strong> (score: {ev.score:.2f})<br>
-                  {ev.chunk.content[:350]}...
+                  <strong>{_e(ev.chunk.title)}</strong> (score: {ev.score:.2f})<br>
+                  {_e(ev.chunk.content[:350])}...
                 </div>"""
 
             incident_quotes = ""
             for ev in v.similar_incidents[:2]:
                 incident_quotes += f"""
                 <div class="evidence-box">
-                  <strong>{ev.chunk.title}</strong> (score: {ev.score:.2f})<br>
-                  {ev.chunk.content[:300]}...
+                  <strong>{_e(ev.chunk.title)}</strong> (score: {ev.score:.2f})<br>
+                  {_e(ev.chunk.content[:300])}...
                 </div>"""
 
             rule_source = "🌐 Universal Rule" if "universal" in str(v.rule_violated).lower() else "📋 From Lab Manual"
@@ -120,22 +133,22 @@ class ReportGenerator:
             violation_cards += f"""
             <div class="violation-card">
               <div class="v-header">
-                <span class="badge" style="background:{badge_color}">{v.severity.upper()}</span>
-                <h3>{v.violation_type}</h3>
+                <span class="badge" style="background:{badge_color}">{_e(v.severity.upper())}</span>
+                <h3>{_e(v.violation_type)}</h3>
                 <span class="v-timestamp">⏱ {_fmt_ts(v.event.timestamp_sec)}</span>
               </div>
               <div class="source-tag">{rule_source}</div>
-              <div class="rule-box"><strong>Rule Violated:</strong> {v.rule_violated}</div>
-              <p class="explanation">{v.explanation}</p>
+              <div class="rule-box"><strong>Rule Violated:</strong> {_e(v.rule_violated)}</div>
+              <p class="explanation">{_e(v.explanation)}</p>
               <div class="actions">
                 <div class="action-box immediate">
-                  <strong>⚡ Immediate</strong><span>{v.immediate_action}</span>
+                  <strong>⚡ Immediate</strong><span>{_e(v.immediate_action)}</span>
                 </div>
                 <div class="action-box recommended">
-                  <strong>🔧 Recommended</strong><span>{v.recommended_action}</span>
+                  <strong>🔧 Recommended</strong><span>{_e(v.recommended_action)}</span>
                 </div>
                 <div class="action-box preventive">
-                  <strong>🛡 Preventive</strong><span>{v.preventive_measure}</span>
+                  <strong>🛡 Preventive</strong><span>{_e(v.preventive_measure)}</span>
                 </div>
               </div>
               <h4>SOP Evidence</h4>
@@ -144,12 +157,6 @@ class ReportGenerator:
               {incident_quotes or '<div class="evidence-box">No similar incidents found.</div>'}
             </div>"""
 
-        key_findings_html = "".join(
-            f"<li>{f}</li>" for f in report.key_findings
-        )
-        immediate_actions_html = "".join(
-            f"<li>{a}</li>" for a in report.immediate_actions_required
-        )
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -266,7 +273,7 @@ class ReportGenerator:
 <div class="header">
   <h1>🔬 LabSentinel-RAG</h1>
   <p>Multimodal Evidence-Grounded Laboratory Incident Investigation Report &nbsp;·&nbsp;
-     Report ID: {report.report_id} &nbsp;·&nbsp;
+     Report ID: {_e(report.report_id)} &nbsp;·&nbsp;
      {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}</p>
 </div>
 
@@ -276,19 +283,19 @@ class ReportGenerator:
   <div class="stat-card"><div class="num">{report.metadata.get('frames_sampled','-')}</div><div class="lbl">Frames Analysed</div></div>
   <div class="stat-card">
     <div style="font-size:0.75em;color:var(--muted);margin-bottom:6px">RISK LEVEL</div>
-    <span class="risk-pill">{report.overall_risk_level.upper()}</span>
+    <span class="risk-pill">{_e(report.overall_risk_level.upper())}</span>
   </div>
 </div>
 
 <h2>Executive Summary</h2>
 {warnings_html}
-<div class="summary-box">{report.incident_summary}</div>
+<div class="summary-box">{_e(report.incident_summary)}</div>
 
 <h2>Key Findings</h2>
-<ul>{"".join(f"<li>{f}</li>" for f in report.key_findings) or "<li>See violation details below.</li>"}</ul>
+<ul>{"".join(f"<li>{_e(f)}</li>" for f in report.key_findings) or "<li>See violation details below.</li>"}</ul>
 
 <h2>Immediate Actions Required</h2>
-<ul>{"".join(f"<li>{a}</li>" for a in report.immediate_actions_required) or "<li>Review violation details and implement corrective actions.</li>"}</ul>
+<ul>{"".join(f"<li>{_e(a)}</li>" for a in report.immediate_actions_required) or "<li>Review violation details and implement corrective actions.</li>"}</ul>
 
 <h2>Violation Timeline ({len(violation_events)} events)</h2>
 <table>
@@ -300,7 +307,7 @@ class ReportGenerator:
 {violation_cards or '<p style="color:var(--muted)">No violations confirmed in this incident.</p>'}
 
 <div class="footer">
-  Generated by LabSentinel-RAG &nbsp;·&nbsp; {report.video_path}
+  Generated by LabSentinel-RAG &nbsp;·&nbsp; {_e(report.video_path)}
 </div>
 </body>
 </html>"""
@@ -317,7 +324,7 @@ class ReportGenerator:
             SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
         )
 
-        path = self.output_dir / f"report_{report.report_id[:8]}.pdf"
+        path = self.output_dir / f"{_file_stem(report.report_id)}.pdf"
 
         doc = SimpleDocTemplate(
             str(path),
@@ -343,7 +350,7 @@ class ReportGenerator:
         # Header
         story.append(Paragraph("LabSentinel-RAG Investigation Report", title_style))
         story.append(Paragraph(
-            f"Report ID: {report.report_id} | Generated: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
+            f"Report ID: {_e(report.report_id)} | Generated: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
             styles["Normal"]
         ))
         story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498db")))
@@ -351,14 +358,16 @@ class ReportGenerator:
 
         # Risk level
         story.append(Paragraph(
-            f"Overall Risk Level: <font color='{rc.hexval() if hasattr(rc,'hexval') else '#e74c3c'}'><b>{report.overall_risk_level.upper()}</b></font>",
+            f"Overall Risk Level: <font color='{rc.hexval() if hasattr(rc,'hexval') else '#e74c3c'}'><b>{_e(report.overall_risk_level.upper())}</b></font>",
             body_style
         ))
         story.append(Spacer(1, 0.3 * cm))
 
         # Summary
         story.append(Paragraph("Executive Summary", h2_style))
-        story.append(Paragraph(report.incident_summary, body_style))
+        story.append(Paragraph(_e(report.incident_summary), body_style))
+        for w in report.metadata.get("warnings", []) or []:
+            story.append(Paragraph(f"<font color='#b45309'><b>Warning:</b> {_e(w)}</font>", body_style))
         story.append(Spacer(1, 0.4 * cm))
 
         # Stats table
@@ -386,17 +395,19 @@ class ReportGenerator:
         # Violations
         story.append(Paragraph(f"Confirmed Violations ({report.total_violations})", h2_style))
         for i, v in enumerate(report.violations, 1):
-            story.append(Paragraph(f"{i}. [{v.severity.upper()}] {v.violation_type} @ {_fmt_ts(v.event.timestamp_sec)}", h3_style))
-            story.append(Paragraph(f"<b>Rule Violated:</b> {v.rule_violated}", body_style))
-            story.append(Paragraph(f"<b>Explanation:</b> {v.explanation}", body_style))
-            story.append(Paragraph(f"<b>Immediate Action:</b> {v.immediate_action}", body_style))
-            story.append(Paragraph(f"<b>Recommended Action:</b> {v.recommended_action}", body_style))
+            story.append(Paragraph(f"{i}. [{_e(v.severity.upper())}] {_e(v.violation_type)} @ {_fmt_ts(v.event.timestamp_sec)}", h3_style))
+            story.append(Paragraph(f"<b>Rule Violated:</b> {_e(v.rule_violated)}", body_style))
+            story.append(Paragraph(f"<b>Explanation:</b> {_e(v.explanation)}", body_style))
+            story.append(Paragraph(f"<b>Immediate Action:</b> {_e(v.immediate_action)}", body_style))
+            story.append(Paragraph(f"<b>Recommended Action:</b> {_e(v.recommended_action)}", body_style))
+            if v.preventive_measure:
+                story.append(Paragraph(f"<b>Preventive Measure:</b> {_e(v.preventive_measure)}", body_style))
 
             if v.sop_evidence:
                 best = v.sop_evidence[0]
                 story.append(Paragraph(
-                    f"<b>Top SOP Reference:</b> {best.chunk.title} (similarity: {best.score:.2f})<br/>"
-                    f"<i>{best.chunk.content[:250]}...</i>",
+                    f"<b>Top SOP Reference:</b> {_e(best.chunk.title)} (similarity: {best.score:.2f})<br/>"
+                    f"<i>{_e(best.chunk.content[:250])}...</i>",
                     body_style
                 ))
             story.append(Spacer(1, 0.3 * cm))

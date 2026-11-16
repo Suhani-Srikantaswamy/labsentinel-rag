@@ -18,7 +18,7 @@ from src.utils.models import (
     VideoAnalysisResult, InvestigationReport,
 )
 from src.utils.json_utils import parse_llm_json
-from src.utils.llm_client import get_client
+from src.utils.llm_client import get_client, FatalLLMError
 from src.utils.time_utils import format_human_time
 
 
@@ -118,7 +118,8 @@ class ViolationReasoner:
 
     def __init__(self):
         self.client = get_client()
-        logger.info(f"ViolationReasoner ready")
+        self.failed_events = 0
+        logger.info("ViolationReasoner ready")
 
     def analyse_event(
         self,
@@ -146,16 +147,18 @@ class ViolationReasoner:
                 max_tokens  = 800,
             )
             data = parse_llm_json(resp.text)
-            if not data.get("is_violation", False):
+            if not data:
+                raise ValueError("unparseable reasoning reply")
+            if not _as_bool(data.get("is_violation", False)):
                 logger.debug(f"No violation confirmed @ {event.timestamp_sec}s")
                 return None
             return Violation(
                 violation_id       = str(uuid.uuid4()),
                 event              = event,
-                violation_type     = data.get("violation_type", "Unknown"),
-                rule_violated      = data.get("rule_violated", "Unspecified"),
-                explanation        = data.get("explanation", ""),
-                severity           = data.get("severity", event.severity),
+                violation_type     = str(data.get("violation_type") or "Unknown"),
+                rule_violated      = str(data.get("rule_violated") or "Unspecified"),
+                explanation        = str(data.get("explanation") or ""),
+                severity           = _norm_severity(data.get("severity"), event.severity),
                 sop_evidence       = evidence.get("sops", []),
                 similar_incidents  = evidence.get("incidents", []),
                 equipment_notes    = evidence.get("manuals", []),
@@ -163,9 +166,25 @@ class ViolationReasoner:
                 recommended_action = data.get("recommended_action", ""),
                 preventive_measure = data.get("preventive_measure", ""),
             )
+        except FatalLLMError:
+            raise
         except Exception as e:
-            logger.error(f"Reasoning failed @ {event.timestamp_sec}s: {e}")
-            return None
+            # Don't silently drop an event the vision model flagged — keep it, marked unverified
+            self.failed_events += 1
+            logger.error(f"Reasoning failed @ {event.timestamp_sec}s: {e} — keeping as unverified")
+            return Violation(
+                violation_id       = str(uuid.uuid4()),
+                event              = event,
+                violation_type     = "Unverified (reasoning step failed)",
+                rule_violated      = "Not verified — review footage manually",
+                explanation        = f"The vision model flagged: {event.description}. "
+                                     "Automatic rule verification failed, so this needs manual review.",
+                severity           = _norm_severity(event.severity, "medium"),
+                sop_evidence       = evidence.get("sops", []),
+                similar_incidents  = evidence.get("incidents", []),
+                equipment_notes    = evidence.get("manuals", []),
+                immediate_action   = "Review this moment of the footage.",
+            )
 
     def build_report(
         self,
@@ -198,11 +217,19 @@ class ViolationReasoner:
                 temperature = 0.2,
                 max_tokens  = 600,
             )
-            data         = parse_llm_json(resp.text)
-            summary      = data.get("executive_summary", summary)
-            overall_risk = data.get("overall_risk_level", overall_risk)
-            findings     = data.get("key_findings", [])
-            actions      = data.get("immediate_actions", [])
+            data = parse_llm_json(resp.text)
+            if not data:
+                raise ValueError("unparseable summary reply")
+            summary  = str(data.get("executive_summary") or summary)
+            findings = _as_str_list(data.get("key_findings"))
+            actions  = _as_str_list(data.get("immediate_actions"))
+            llm_risk = _norm_severity(data.get("overall_risk_level"), overall_risk)
+            # Overall risk can never be lower than the worst confirmed violation
+            overall_risk = max([llm_risk, overall_risk], key=lambda s: _SEVERITY_RANK.get(s, 0))
+            if not violations:
+                overall_risk = "low"
+        except FatalLLMError:
+            raise
         except Exception as e:
             logger.warning(f"Report summary failed (fallback): {e}")
             # Build a real summary from the violations we have
@@ -236,18 +263,42 @@ class ViolationReasoner:
         )
 
 
+def _norm_severity(value, default: str = "medium") -> str:
+    v = str(value or "").strip().lower()
+    if v in _SEVERITY_RANK:
+        return v
+    d = str(default or "").strip().lower()
+    return d if d in _SEVERITY_RANK else "medium"
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return bool(value)
+
+
+def _as_str_list(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value if str(x).strip()]
+    return [str(value)]
+
+
 def _derive_risk(violations: list[Violation]) -> str:
     if not violations:
         return "low"
-    return max(violations, key=lambda v: _SEVERITY_RANK.get(v.severity, 0)).severity
+    return _norm_severity(max(violations, key=lambda v: _SEVERITY_RANK.get(v.severity, 0)).severity, "medium")
 
 
-def _fmt(items: list[RetrievedEvidence], n: int = 3) -> str:
+def _fmt(items: list[RetrievedEvidence], n: int = 4) -> str:
     if not items:
         return "  (none retrieved)"
     lines = []
     for i, e in enumerate(items[:n], 1):
-        snippet = e.chunk.content[:300].replace("\n", " ")
+        snippet = e.chunk.content[:700].replace("\n", " ")
         lines.append(f"  {i}. [{e.chunk.title}] (score={e.score:.2f}) — {snippet}…")
     return "\n".join(lines)
 

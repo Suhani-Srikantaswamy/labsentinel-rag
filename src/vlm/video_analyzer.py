@@ -12,6 +12,7 @@ Accuracy design:
 """
 
 from __future__ import annotations
+import re
 import uuid
 
 from loguru import logger
@@ -19,7 +20,7 @@ from loguru import logger
 from config.settings import settings
 from src.utils.models import DetectedEvent, VideoAnalysisResult
 from src.utils.json_utils import parse_llm_json
-from src.utils.llm_client import get_client
+from src.utils.llm_client import get_client, FatalLLMError
 from src.utils.time_utils import format_human_time
 from .video_chunker import extract_frames_chunked, get_video_info
 
@@ -246,6 +247,7 @@ class VideoAnalyzer:
 
         events: list[DetectedEvent] = []
         prev_event: DetectedEvent | None = None
+        self._failed_frames = 0
 
         for i, frame in enumerate(frames):
             event = self._analyse_frame(frame, manual_ctx, prev_event)
@@ -266,6 +268,8 @@ class VideoAnalyzer:
         summary = self._synthesise_timeline(events, duration)
 
         n_viol = sum(1 for e in events if e.potential_violation)
+        if self._failed_frames:
+            logger.warning(f"{self._failed_frames}/{len(frames)} frames could not be analysed")
         logger.success(f"Done — {len(events)} events, {n_viol} potential violations")
         if on_progress:
             on_progress(1.0, f"Video analysis done — {n_viol} potential violations in {len(events)} events")
@@ -276,10 +280,12 @@ class VideoAnalyzer:
             total_frames_sampled = len(frames),
             events               = events,
             summary              = summary,
+            failed_frames        = self._failed_frames,
         )
 
     def analyse_image(self, image_path: str) -> DetectedEvent | None:
         import base64
+        self._failed_frames = 0
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
         return self._analyse_frame(
@@ -301,7 +307,7 @@ class VideoAnalyzer:
             prev_ctx = (
                 f"Violation flag={prev_event.potential_violation}, "
                 f"severity={prev_event.severity}. "
-                f"PPE observed: {prev_event.description[:120]}"
+                f"Observed: {prev_event.description[:160]}"
             )
             prev_ts = prev_event.timestamp_sec
         else:
@@ -324,6 +330,8 @@ class VideoAnalyzer:
             )
             data = parse_llm_json(resp.text)
             if not data:
+                self._failed_frames += 1
+                logger.warning(f"Unparseable VLM reply @ {frame['timestamp_sec']}s — frame skipped")
                 return None
 
             data = _sanitize_frame_result(data)
@@ -334,27 +342,34 @@ class VideoAnalyzer:
             chk        = data.get("checklist_findings", [])
             ppe_status = data.get("ppe_status", {})
 
-            severity = data.get("severity", "none")
-            missing_ppe = [k for k, v in ppe_status.items() if v == "missing"]
+            severity = str(data.get("severity", "none")).lower()
+            is_violation = bool(data.get("potential_violation", False))
+            missing_ppe = [k for k, v in ppe_status.items() if str(v).lower() == "missing"]
 
-            if missing_ppe and severity in ("none", "low"):
+            # Only escalate severity for frames that are actually flagged
+            if is_violation and missing_ppe and severity in ("none", "low"):
                 severity = "medium"
-            if "lab_coat" in missing_ppe and len(missing_ppe) >= 2:
+            if is_violation and "lab_coat" in missing_ppe and len(missing_ppe) >= 2:
                 severity = "high"
+            if is_violation and severity == "none":
+                severity = "low"
 
             return DetectedEvent(
                 event_id            = str(uuid.uuid4()),
                 timestamp_sec       = frame["timestamp_sec"],
                 frame_index         = frame["frame_index"],
                 description         = f"[{lab_type.upper()} LAB] {data.get('description', '')}",
-                objects_involved    = objects + chk + [f"lab_type:{lab_type}"],
-                actions_observed    = data.get("actions_observed", []),
-                potential_violation = bool(data.get("potential_violation", False)),
+                objects_involved    = [str(o) for o in objects] + [str(c) for c in chk] + [f"lab_type:{lab_type}"],
+                actions_observed    = [str(a) for a in data.get("actions_observed", []) or []],
+                potential_violation = is_violation,
                 severity            = severity,
-                confidence          = float(data.get("confidence", 0.5)),
+                confidence          = max(0.0, min(1.0, float(data.get("confidence", 0.5) or 0.0))),
                 frame_path          = frame["frame_path"],
             )
+        except FatalLLMError:
+            raise   # all keys exhausted / project blocked — abort the run, don't fake a clean report
         except Exception as e:
+            self._failed_frames += 1
             logger.warning(f"Frame analysis failed @ {frame['timestamp_sec']}s: {e}")
             return None
 
@@ -388,6 +403,8 @@ class VideoAnalyzer:
                 summary = data.get("incident_summary", "")
                 if summary:
                     return summary
+            except FatalLLMError:
+                break
             except Exception as e:
                 logger.warning(f"Timeline synthesis attempt {attempt+1} failed: {e}")
 
@@ -407,106 +424,155 @@ class VideoAnalyzer:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_PPE_WORDS = ("ppe", "glove", "goggle", "lab coat", "coat", "eye protection", "safety glasses",
+              "face shield", "respirator", "mask", "apron", "footwear", "shoes")
+_NO_ISSUE_PREFIXES = ("none", "n/a", "na", "no issue", "no issues", "no violation", "no violations",
+                      "nothing", "all safety", "compliant", "fully compliant")
+_UNCERTAIN_PHRASES = ("cannot determine", "can't determine", "unable to determine", "no clear evidence",
+                      "too blurry", "image unclear", "not enough detail")
+_MIN_CONFIDENCE = 0.55
+
+
+def _mentions_ppe(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in _PPE_WORDS)
+
+
 def _sanitize_frame_result(data: dict) -> dict:
-    """Guard against uncertain or generic cues being promoted into false violations."""
+    """
+    Guard against unsupported flags without discarding real findings.
+
+    The model's own structured output (ppe_status, checklist_findings,
+    violation_hint) is treated as the evidence. A flag is kept when there is
+    concrete evidence and confidence >= 0.55. PPE findings are ignored when no
+    person is in frame (nobody to wear it), and purely uncertain hints are not
+    counted as evidence.
+    """
     if not isinstance(data, dict):
         return {}
 
     cleaned = dict(data)
-    description = str(cleaned.get("description", "")).lower()
-    hint = str(cleaned.get("violation_hint", "")).lower()
-    combined_text = f"{description} {hint}".strip()
-    people_count = int(cleaned.get("people_count", 0) or 0)
+    try:
+        people_count = int(cleaned.get("people_count", 0) or 0)
+    except (TypeError, ValueError):
+        people_count = 0
+    try:
+        confidence = float(cleaned.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
     ppe_status = cleaned.get("ppe_status", {}) or {}
+    if not isinstance(ppe_status, dict):
+        ppe_status = {}
     missing_ppe = [k for k, v in ppe_status.items() if str(v).lower() == "missing"]
 
-    uncertain_markers = (
-        "cannot determine",
-        "uncertain",
-        "not clearly",
-        "no clear evidence",
-        "no direct violation",
-        "not visible",
-        "unable to determine",
-    )
-    if any(marker in combined_text for marker in uncertain_markers):
-        cleaned["potential_violation"] = False
-        cleaned["severity"] = "none"
-        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.35)
-        return cleaned
+    findings = cleaned.get("checklist_findings", []) or []
+    if isinstance(findings, str):
+        findings = [findings]
+    findings = [str(f).strip() for f in findings if str(f).strip()]
+    findings = [f for f in findings if not f.lower().startswith(_NO_ISSUE_PREFIXES)]
 
-    if people_count == 0 and missing_ppe:
-        cleaned["potential_violation"] = False
-        cleaned["severity"] = "none"
-        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.35)
-        return cleaned
+    hint = str(cleaned.get("violation_hint", "") or "").strip()
+    if hint.lower().startswith(_NO_ISSUE_PREFIXES):
+        hint = ""
 
-    direct_markers = (
-        "without",
-        "missing",
-        "not wearing",
-        "unbalanced",
-        "lid open",
-        "open lid",
-        "spill",
-        "blocked",
-        "cracked",
-        "overflow",
-        "not capped",
-    )
-    has_direct_evidence = any(marker in combined_text for marker in direct_markers)
-    if not has_direct_evidence and bool(cleaned.get("potential_violation")):
-        cleaned["potential_violation"] = False
-        cleaned["severity"] = "none"
-        cleaned["confidence"] = min(float(cleaned.get("confidence", 0.0) or 0.0), 0.4)
+    if people_count == 0:
+        # Nobody present → PPE can't be "missing"; keep equipment/hazard findings only
+        missing_ppe = []
+        findings = [f for f in findings if not _mentions_ppe(f)]
+        if _mentions_ppe(hint):
+            hint = ""
 
-    if cleaned.get("potential_violation") and float(cleaned.get("confidence", 0.0) or 0.0) < 0.55:
-        cleaned["potential_violation"] = False
-        cleaned["severity"] = "none"
+    def _certain(text: str) -> bool:
+        return bool(text) and not any(p in text.lower() for p in _UNCERTAIN_PHRASES)
 
+    has_evidence = bool(missing_ppe) or any(_certain(f) for f in findings) or _certain(hint)
+
+    flagged = bool(cleaned.get("potential_violation"))
+    # Model reported missing PPE on a person but forgot to set the flag
+    if not flagged and missing_ppe and confidence >= _MIN_CONFIDENCE:
+        flagged = True
+
+    if flagged and (not has_evidence or confidence < _MIN_CONFIDENCE):
+        flagged = False
+
+    cleaned["potential_violation"] = flagged
+    if not flagged:
+        cleaned["severity"] = "none"
+        cleaned["confidence"] = min(confidence, 0.4)
     return cleaned
 
 
-def _collapse_adjacent_events(events: list[DetectedEvent]) -> list[DetectedEvent]:
-    """Merge repeated flag events that are the same issue across nearby frames."""
+_STOPWORDS = {"the", "a", "an", "is", "are", "and", "or", "of", "in", "on", "at", "to", "with",
+              "while", "for", "by", "be", "lab", "laboratory", "worker", "researcher", "person",
+              "frame", "this", "that", "their", "his", "her", "who", "near", "from"}
+_SEV_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _tokens(text: str) -> set[str]:
+    text = re.sub(r"^\[[^\]]*\]\s*", "", text.lower())       # drop "[CHEMISTRY LAB]" prefix
+    return {w for w in re.findall(r"[a-z0-9]+", text) if w not in _STOPWORDS and len(w) > 2}
+
+
+def _jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def _same_issue(a: DetectedEvent, b: DetectedEvent) -> bool:
+    """True when two flagged events describe the same violation (not merely the same lab)."""
+    if a.description.lower() == b.description.lower():
+        return True
+    if _jaccard(_tokens(a.description), _tokens(b.description)) >= 0.5:
+        return True
+    objs = lambda e: {str(x).lower() for x in e.objects_involved if not str(x).startswith("lab_type:")}
+    return _jaccard(objs(a), objs(b)) >= 0.6
+
+
+def _collapse_adjacent_events(events: list[DetectedEvent], max_gap: float = 8.0) -> list[DetectedEvent]:
+    """
+    Merge consecutive frames showing the SAME ongoing violation into one event.
+    Different violations close together in time are kept separate. The gap is
+    measured from the last frame where the violation was seen, so an issue that
+    persists for a long time stays one event.
+    """
     if not events:
         return []
 
     ordered = sorted(events, key=lambda e: (e.timestamp_sec, e.frame_index))
     collapsed: list[DetectedEvent] = []
+    last_seen: dict[int, float] = {}     # index in collapsed → last timestamp observed
 
     for event in ordered:
         if not event.potential_violation:
-            if event.severity in ("none", "low"):
+            if event.severity in ("none", "low", "unknown"):
                 continue
             collapsed.append(event)
             continue
 
-        if not collapsed:
+        merged_into = None
+        for idx in range(len(collapsed) - 1, -1, -1):
+            prev = collapsed[idx]
+            if not prev.potential_violation:
+                continue
+            if event.timestamp_sec - last_seen.get(idx, prev.timestamp_sec) > max_gap:
+                continue
+            if _same_issue(prev, event):
+                merged_into = idx
+                break
+
+        if merged_into is None:
             collapsed.append(event)
+            last_seen[len(collapsed) - 1] = event.timestamp_sec
             continue
 
-        last = collapsed[-1]
-        gap = event.timestamp_sec - last.timestamp_sec
-        if gap <= 8.0 and last.potential_violation and event.potential_violation:
-            same_desc = (
-                event.description.lower() == last.description.lower()
-                or set(event.description.lower().split()) & set(last.description.lower().split())
-            )
-            same_objects = set(str(x).lower() for x in event.objects_involved) & set(
-                str(x).lower() for x in last.objects_involved
-            )
-            if same_desc or same_objects:
-                merged = last.model_copy()
-                merged.timestamp_sec = min(last.timestamp_sec, event.timestamp_sec)
-                merged.frame_index = min(last.frame_index, event.frame_index)
-                merged.description = last.description if len(last.description) >= len(event.description) else event.description
-                merged.confidence = max(last.confidence, event.confidence)
-                merged.severity = max([last.severity, event.severity], key=lambda s: {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(s, 0))
-                collapsed[-1] = merged
-                continue
-
-        collapsed.append(event)
+        last = collapsed[merged_into]
+        merged = last.model_copy()
+        merged.description = last.description if len(last.description) >= len(event.description) else event.description
+        merged.confidence = max(last.confidence, event.confidence)
+        merged.severity = max([last.severity, event.severity], key=lambda s: _SEV_RANK.get(s, 0))
+        merged.objects_involved = list(dict.fromkeys(last.objects_involved + event.objects_involved))
+        collapsed[merged_into] = merged
+        last_seen[merged_into] = event.timestamp_sec
 
     return collapsed
 

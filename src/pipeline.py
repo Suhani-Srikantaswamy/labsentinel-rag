@@ -2,7 +2,7 @@
 LabSentinel-RAG — Pipeline Orchestrator
 
 Stage 1: Validate inputs
-Stage 2: Video Analysis  — GPT-4o Vision reads every frame against the uploaded manual
+Stage 2: Video Analysis  — the vision model (Gemini / GPT-4o) reads sampled frames against the uploaded manual
 Stage 3: RAG Retrieval   — retrieve relevant passages from the manual for each event
 Stage 4: LLM Reasoning   — confirm violations, cite exact rule, give recommendations
 Stage 5: Output          — generate structured report (JSON + HTML + PDF)
@@ -86,6 +86,12 @@ class LabSentinelPipeline:
 
         # ── Stage 3: RAG Retrieval ────────────────────────────────────────────
         _prog(0.57, "Stage 3 — Retrieving relevant manual passages …")
+        if violation_events and manual_text.strip():
+            try:
+                n_passages = self.retriever.index_session_manual(manual_text)
+                _prog(0.575, f"Indexed uploaded manual — {n_passages} passages searchable")
+            except Exception as e:
+                logger.warning(f"Could not index uploaded manual for retrieval: {e}")
         all_evidence: dict[str, dict] = {}
         n = len(violation_events)
         for i, event in enumerate(violation_events):
@@ -96,7 +102,9 @@ class LabSentinelPipeline:
 
         # ── Stage 4: LLM Reasoning ────────────────────────────────────────────
         _prog(0.68, "Stage 4 — Reasoning over violations …")
+        self.retriever.clear_session_manual()
         violations: list[Violation] = []
+        self.reasoner.failed_events = 0
         for i, event in enumerate(violation_events):
             evidence  = all_evidence.get(event.event_id, {})
             violation = self.reasoner.analyse_event(event, evidence, manual_text)
@@ -111,6 +119,17 @@ class LabSentinelPipeline:
         report = self.reasoner.build_report(
             video_result, violations, report_id, output_dir
         )
+        warnings = []
+        if video_result.failed_frames:
+            warnings.append(
+                f"{video_result.failed_frames} of {video_result.total_frames_sampled} frames could not be "
+                "analysed (API errors or unreadable replies) — violations in those moments may be missing.")
+        if self.reasoner.failed_events:
+            warnings.append(
+                f"{self.reasoner.failed_events} flagged event(s) could not be verified because the reasoning "
+                "step failed — they are listed as unverified violations.")
+        report.metadata["warnings"] = warnings
+        report.metadata["failed_frames"] = video_result.failed_frames
         output_paths = ReportGenerator(output_dir=output_dir).generate_all(report)
         _prog(1.0, f"Done — {report.total_violations} violations, "
                    f"risk: {report.overall_risk_level.upper()}")

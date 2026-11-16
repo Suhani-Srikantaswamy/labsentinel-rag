@@ -3,7 +3,8 @@ LabSentinel-RAG — Production Web Application
 ClimbingAddict-inspired design: dark dashboard, orange accents, light/dark toggle.
 """
 from __future__ import annotations
-import hashlib, json, os, shutil, socket, tempfile, threading, time
+import hashlib, html as _html, json, os, re, shutil, socket, tempfile, threading, time
+from collections import Counter
 from pathlib import Path
 from queue import Queue, Empty
 import gradio as gr
@@ -49,21 +50,17 @@ def _api_ok():
     return i["configured"], i["status_msg"]
 
 def _extract_text(path: str) -> str:
-    p = Path(path); ext = p.suffix.lower()
+    """Same extractor as the knowledge base (pdfplumber → pypdf fallback, DOCX incl. tables)."""
+    from src.ingestion.document_loader import extract_text
+    p = Path(path)
     try:
-        if ext == ".pdf":
-            import pdfplumber
-            parts = []
-            with pdfplumber.open(str(p)) as pdf:
-                for pg in pdf.pages:
-                    t = pg.extract_text()
-                    if t: parts.append(t)
-            return "\n".join(parts)
-        elif ext in (".docx", ".doc"):
-            from docx import Document
-            return "\n".join(x.text for x in Document(str(p)).paragraphs if x.text.strip())
+        if p.suffix.lower() in (".pdf", ".docx", ".doc", ".json"):
+            text = extract_text(p)
         else:
-            return p.read_text(encoding="utf-8", errors="ignore")
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        if not text.strip():
+            logger.warning(f"No text could be extracted from {p.name}")
+        return text
     except Exception as e:
         logger.warning(f"Text extraction failed {p.name}: {e}"); return ""
 
@@ -165,14 +162,48 @@ def _normalize_lab_type(value):
     return "general"
 
 
+# Distinctive vocabulary per lab type (whole-word / phrase matches, counted)
+_MANUAL_KEYWORDS = {
+    "chemistry": ["chemistry", "fume hood", "fume cupboard", "acid", "acids", "solvent", "solvents", "reagent",
+                  "reagents", "titration", "bunsen", "flammable", "corrosive", "msds", "sds", "chemical hygiene"],
+    "biology": ["biosafety", "bsl", "bsl-2", "biological safety cabinet", "biohazard", "microbiology", "microbial",
+                "pathogen", "pathogens", "culture", "cultures", "petri", "autoclave", "infectious", "bacteria", "virus"],
+    "physics": ["laser", "lasers", "optics", "optical table", "oscilloscope", "radiation", "radioactive",
+                "high voltage", "cryogenic", "magnet"],
+    "engineering": ["machinery", "machine guard", "lathe", "milling", "welding", "grinder", "lockout", "tagout",
+                    "workshop", "power tools", "drill press"],
+    "computer_science": ["computer lab", "computers", "server room", "servers", "keyboard", "workstation",
+                         "network cabling", "software"],
+    "medical": ["patient", "patients", "clinical", "hospital", "phlebotomy", "blood sample", "specimen",
+                "nursing", "ward", "intravenous"],
+}
+
+
 def _infer_lab_type_from_manual(manual_text: str) -> str:
+    """Score each lab type by distinctive-keyword counts; return 'general' unless one clearly dominates."""
     if not manual_text or not manual_text.strip():
         return "general"
     lowered = manual_text.lower()
-    for canonical, aliases in LAB_TYPE_ALIASES.items():
-        if any(alias in lowered for alias in aliases):
-            return canonical
+    scores = {}
+    for lab, words in _MANUAL_KEYWORDS.items():
+        scores[lab] = sum(len(re.findall(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", lowered)) for w in words)
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    (top, top_score), (_, second_score) = ranked[0], ranked[1]
+    if top_score >= 3 and top_score >= 1.5 * max(second_score, 1):
+        return top
     return "general"
+
+
+def _majority_video_lab_type(timeline) -> str:
+    """Most common non-general lab type across all analysed events."""
+    votes = Counter()
+    for event in timeline:
+        for entry in event.objects_involved:
+            if str(entry).startswith("lab_type:"):
+                lt = _normalize_lab_type(str(entry).split(":", 1)[1])
+                if lt != "general":
+                    votes[lt] += 1
+    return votes.most_common(1)[0][0] if votes else "general"
 
 
 def detect_manual_lab_mismatch(video_lab_type, manual_lab_type):
@@ -214,10 +245,12 @@ def _download_url(url: str, progress_cb=None):
             "outtmpl": str(Path(tmp)/"video.%(ext)s"),
             "merge_output_format": "mp4", "quiet": True,
             "no_warnings": True, "noplaylist": True,
-            "ffmpeg_location": "/opt/homebrew/bin/ffmpeg",
             "concurrent_fragment_downloads": 8,
             "progress_hooks": [Hook()],
         }
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            opts["ffmpeg_location"] = ffmpeg
         with yt_dlp.YoutubeDL(opts) as ydl: ydl.download([url])
         for ext in ("mp4","webm","mkv","avi","mov"):
             files = list(Path(tmp).glob(f"*.{ext}"))
@@ -323,26 +356,22 @@ def investigate(video_file, video_url, manual_files,
     if not report:
         return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5)
 
-    video_lab_type = "general"
-    for event in report.timeline:
-        for entry in event.objects_involved:
-            if entry.startswith("lab_type:"):
-                video_lab_type = entry.split(":", 1)[1]
-                break
-        if video_lab_type != "general":
-            break
+    video_lab_type = _majority_video_lab_type(report.timeline)
 
     manual_lab_type = _infer_lab_type_from_manual(manual_text)
     mismatch = detect_manual_lab_mismatch(video_lab_type, manual_lab_type)
+    warnings = list(report.metadata.get("warnings") or [])   # keep pipeline warnings (failed frames etc.)
     if mismatch:
         gr.Warning(f"Manual lab type mismatch: the uploaded manual looks like {manual_lab_type}, but the video appears to be {video_lab_type}. Review the rule set before relying on the report.")
-        report.metadata["warnings"] = [
+        warnings.append(
             f"Manual lab type mismatch: uploaded manual ({manual_lab_type}) does not match the video lab type ({video_lab_type})."
-        ]
-    elif manual_text.strip():
-        report.metadata["warnings"] = []
-    else:
-        report.metadata["warnings"] = ["No manual uploaded — universal safety rules were applied."]
+        )
+    elif not manual_text.strip():
+        warnings.append("No manual uploaded — universal safety rules were applied.")
+    report.metadata["warnings"] = warnings
+    for w in warnings:
+        if "could not be" in w:
+            gr.Warning(w)
     report.metadata["manual_lab_type"] = manual_lab_type
     report.metadata["video_lab_type"] = video_lab_type
     report.metadata["manual_label"] = manual_label
@@ -380,7 +409,8 @@ def build_kb(sop_f, man_f, inc_f, sop_d, man_d, inc_d, reset, progress=gr.Progre
         for files, dest, stype in [(sop_f or [], cfg.SOP_DIR, "sop"),
                                     (man_f or [], cfg.MANUAL_DIR, "manual"),
                                     (inc_f or [], cfg.INCIDENT_DIR, "incident")]:
-            for f in (files if isinstance(files, list) else [files]):
+            for f in _normalize_manual_files(files):
+                f = _coerce_file_path(f)
                 if f:
                     dst = dest / Path(str(f)).name
                     shutil.copy(str(f), str(dst))
@@ -494,7 +524,12 @@ def _load_history_report(report_path: str):
     if not report_path:
         return PLACEHOLDER, "{}", None, _stat("⚠️", "No history item selected"), "", _load_history(5)
 
+    from config.settings import OUTPUT_DIR
     path = Path(report_path)
+    try:
+        path.resolve().relative_to(Path(OUTPUT_DIR).resolve())
+    except ValueError:
+        return PLACEHOLDER, "{}", None, _stat("⚠️", "Invalid history item"), "", _load_history(5)
     if not path.exists():
         return PLACEHOLDER, "{}", None, _stat("⚠️", "History report not found"), "", _load_history(5)
 
@@ -559,7 +594,7 @@ def _load_history(n: int = 5) -> str:
             r       = d.get("overall_risk_level","low")
             n_viol  = d.get("total_violations", 0)
             n_ev    = len(d.get("timeline", []))
-            vid     = Path(d.get("video_path","?")).name[:28]
+            vid     = _html.escape(Path(d.get("video_path","?")).name[:28])
             gen_at  = d.get("generated_at","")[:16].replace("T"," ")
             dur_s   = d.get("metadata",{}).get("duration_sec", 0)
             from src.report.report_generator import _fmt_ts
@@ -567,7 +602,7 @@ def _load_history(n: int = 5) -> str:
             rc      = risk_colors.get(r,"#94a3b8")
             rb      = risk_bg.get(r,"#94a3b818")
             cards.append(f"""
-<div class="ls-history-card" data-history-id="{rp}" style="padding:10px 12px;border-radius:8px;border:1px solid var(--ls-border);
+<div class="ls-history-card" data-history-id="{_html.escape(rp)}" style="padding:10px 12px;border-radius:8px;border:1px solid var(--ls-border);
             background:var(--ls-surface);margin-bottom:6px;cursor:pointer;transition:border-color 0.15s"
      onmouseover="this.style.borderColor='var(--ls-orange)'"
      onmouseout="this.style.borderColor='var(--ls-border)'">
@@ -576,14 +611,14 @@ def _load_history(n: int = 5) -> str:
                  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px"
           title="{vid}">{vid}</span>
     <span style="font-size:0.7em;padding:2px 8px;border-radius:10px;font-weight:700;
-                 color:{rc};background:{rb}">{r.upper()}</span>
+                 color:{rc};background:{rb}">{_html.escape(str(r).upper())}</span>
   </div>
   <div style="display:flex;gap:12px;font-size:0.72em;color:var(--ls-text3)">
     <span>⚠ {n_viol} violations</span>
     <span>📋 {n_ev} events</span>
     <span>⏱ {dur}</span>
   </div>
-  <div style="font-size:0.68em;color:var(--ls-text3);margin-top:3px">{gen_at}</div>
+  <div style="font-size:0.68em;color:var(--ls-text3);margin-top:3px">{_html.escape(gen_at)}</div>
 </div>""")
         except Exception:
             continue
@@ -1326,9 +1361,11 @@ def create_app():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    port  = _resolve_gradio_port(os.getenv("GRADIO_PORT", "7860"))
-    share = os.getenv("GRADIO_SHARE", "false").lower() == "true"
+def launch(port: int | str | None = None, share: bool | None = None):
+    """Start the web UI (used by `python app.py` and `python main.py demo`)."""
+    port  = _resolve_gradio_port(port if port is not None else os.getenv("GRADIO_PORT", "7860"))
+    if share is None:
+        share = os.getenv("GRADIO_SHARE", "false").lower() == "true"
     app   = create_app()
     app.launch(
         server_name   = "0.0.0.0",
@@ -1347,3 +1384,6 @@ if __name__ == "__main__":
         ),
     )
 
+
+if __name__ == "__main__":
+    launch()

@@ -415,3 +415,114 @@ class TestDetectionQuality:
         files = [["/tmp/a.txt"], "/tmp/b.txt", None, ["/tmp/c.txt"]]
         normalized = _normalize_manual_files(files)
         assert normalized == ["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"]
+
+
+# ── Regression tests for audit fixes ──────────────────────────────────────────
+
+class TestSanitizerKeepsRealViolations:
+    @pytest.mark.parametrize("desc", [
+        "Researcher is eating a sandwich at the chemical bench.",
+        "Researcher pipetting acid with no gloves.",
+        "Researcher using a mobile phone while titrating.",
+        "Fume hood sash is raised above the safe working height.",
+        "Open unlabelled beaker of liquid left on the bench.",
+        "Researcher pouring acid; eye protection not visible on the face.",
+    ])
+    def test_real_violation_kept(self, desc):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+        d = {"description": desc, "people_count": 1, "ppe_status": {}, "potential_violation": True,
+             "violation_hint": desc, "severity": "high", "confidence": 0.9}
+        assert _sanitize_frame_result(d)["potential_violation"] is True
+
+    def test_low_confidence_dropped(self):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+        d = {"description": "x", "people_count": 1, "potential_violation": True,
+             "violation_hint": "no gloves", "severity": "high", "confidence": 0.3}
+        assert _sanitize_frame_result(d)["potential_violation"] is False
+
+    def test_no_issue_hint_dropped(self):
+        from src.vlm.video_analyzer import _sanitize_frame_result
+        d = {"description": "x", "people_count": 1, "potential_violation": True,
+             "violation_hint": "None. All rules followed.", "checklist_findings": [],
+             "severity": "low", "confidence": 0.9}
+        assert _sanitize_frame_result(d)["potential_violation"] is False
+
+
+class TestCollapseKeepsDistinctViolations:
+    def _ev(self, i, t, desc, objs):
+        return DetectedEvent(event_id=str(i), timestamp_sec=t, frame_index=i, description=desc,
+                             objects_involved=objs, potential_violation=True, severity="high", confidence=0.9)
+
+    def test_distinct_violations_not_merged(self):
+        from src.vlm.video_analyzer import _collapse_adjacent_events
+        evs = [self._ev(1, 10, "[CHEMISTRY LAB] Worker pouring HCl without goggles", ["HCl", "beaker", "lab_type:chemistry"]),
+               self._ev(2, 14, "[CHEMISTRY LAB] Fume hood sash raised above safe line", ["fume hood", "lab_type:chemistry"])]
+        assert len(_collapse_adjacent_events(evs)) == 2
+
+    def test_persistent_violation_stays_one_event(self):
+        from src.vlm.video_analyzer import _collapse_adjacent_events
+        evs = [self._ev(i, t, "[CHEMISTRY LAB] Worker pouring HCl without goggles", ["HCl"]) for i, t in enumerate([0, 6, 12, 18, 24])]
+        out = _collapse_adjacent_events(evs)
+        assert len(out) == 1 and out[0].timestamp_sec == 0
+
+
+class TestManualLabInference:
+    def test_biology_manual_mentioning_chemicals(self):
+        import app
+        text = "BSL-2 biosafety cabinet rules. Biohazard waste. Cultures of pathogens. Use chemical disinfectant."
+        assert app._infer_lab_type_from_manual(text) == "biology"
+
+    def test_ambiguous_manual_is_general(self):
+        import app
+        assert app._infer_lab_type_from_manual("Keep materials stored safely. Wash hands.") == "general"
+
+
+class TestLLMClientTruncation:
+    def test_truncated_reply_retried_then_raises(self, monkeypatch):
+        from src.utils import llm_client as lc
+        c = lc.GeminiClient.__new__(lc.GeminiClient)
+        c._keys, c._idx = ["k"], 0
+        calls = []
+        def fake_call(prompt, images, temperature, max_tokens):
+            calls.append(max_tokens)
+            return lc.LLMResponse('{"a": ', truncated=True)
+        c._call = fake_call
+        with pytest.raises(lc.TruncatedResponseError):
+            c.chat("p", max_tokens=100)
+        assert len(calls) == 2 and calls[1] == calls[0] * 2
+
+    def test_transient_error_retried(self, monkeypatch):
+        from src.utils import llm_client as lc
+        monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+        c = lc.GeminiClient.__new__(lc.GeminiClient)
+        c._keys, c._idx = ["k"], 0
+        n = {"i": 0}
+        def fake_call(*a):
+            n["i"] += 1
+            if n["i"] < 3:
+                raise RuntimeError("503 UNAVAILABLE model overloaded")
+            return lc.LLMResponse('{"ok": true}')
+        c._call = fake_call
+        assert c.chat("p").json() == {"ok": True}
+
+
+class TestReportEscaping:
+    def test_html_escapes_model_text(self, report, tmp_path):
+        from src.report.report_generator import ReportGenerator
+        report.incident_summary = "<script>alert(1)</script>"
+        html = ReportGenerator(output_dir=str(tmp_path))._render_html(report)
+        assert "<script>alert(1)</script>" not in html
+
+    def test_pdf_handles_markup_chars(self, report, tmp_path):
+        from src.report.report_generator import ReportGenerator
+        report.violations[0].rule_violated = "Acid conc. x<y & keep <b unclosed"
+        assert Path(ReportGenerator(output_dir=str(tmp_path)).to_pdf(report)).exists()
+
+
+class TestDeterministicChunkIds:
+    def test_same_file_same_ids(self, tmp_path):
+        from src.ingestion.document_loader import DocumentLoader
+        f = tmp_path / "sop.txt"; f.write_text("Always wear PPE. " * 100)
+        a = DocumentLoader(chunk_size=30, chunk_overlap=5).load_file(f, "sop")
+        b = DocumentLoader(chunk_size=30, chunk_overlap=5).load_file(f, "sop")
+        assert [c.chunk_id for c in a] == [c.chunk_id for c in b]

@@ -13,8 +13,8 @@ a list of DocumentChunk objects ready for embedding.
 """
 
 from __future__ import annotations
+import hashlib
 import json
-import uuid
 from pathlib import Path
 
 from loguru import logger
@@ -34,8 +34,11 @@ def _extract_text(path: Path) -> str:
 
     if ext == ".pdf":
         return _pdf_text(path)
-    elif ext in (".docx", ".doc"):
+    elif ext == ".docx":
         return _docx_text(path)
+    elif ext == ".doc":
+        logger.warning(f"Legacy .doc is not supported — save {path.name} as .docx or PDF")
+        return ""
     elif ext in (".txt", ".md"):
         return path.read_text(encoding="utf-8", errors="ignore")
     elif ext == ".json":
@@ -54,7 +57,10 @@ def _pdf_text(path: Path) -> str:
                 t = page.extract_text()
                 if t:
                     parts.append(t)
-        return "\n".join(parts)
+        text = "\n".join(parts)
+        if text.strip():
+            return text
+        raise ValueError("pdfplumber extracted no text")
     except Exception:
         # fallback to pypdf
         try:
@@ -70,7 +76,14 @@ def _docx_text(path: Path) -> str:
     try:
         from docx import Document
         doc = Document(str(path))
-        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        # Rules are often written in tables — include them too
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    parts.append(" | ".join(dict.fromkeys(cells)))
+        return "\n".join(parts)
     except Exception as e:
         logger.error(f"DOCX extraction failed for {path.name}: {e}")
         return ""
@@ -127,7 +140,12 @@ def _chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 # ── DocumentLoader ────────────────────────────────────────────────────────────
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".json"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".json"}
+
+
+def extract_text(path: str | Path) -> str:
+    """Public helper: extract plain text from any supported document."""
+    return _extract_text(Path(path))
 
 
 class DocumentLoader:
@@ -149,14 +167,19 @@ class DocumentLoader:
         self.chunk_size    = chunk_size    or settings.rag.chunk_size
         self.chunk_overlap = chunk_overlap or settings.rag.chunk_overlap
 
-    def load_all(self) -> list[DocumentChunk]:
-        """Load all documents from the three default directories."""
-        from config import SOP_DIR, MANUAL_DIR, INCIDENT_DIR
+    def load_all(
+        self,
+        sop_dir: str | Path | None = None,
+        manual_dir: str | Path | None = None,
+        incident_dir: str | Path | None = None,
+    ) -> list[DocumentChunk]:
+        """Load all documents from the three directories (explicit args override defaults)."""
+        import config.settings as cfg   # read at call time so overrides on the module are honoured
         chunks: list[DocumentChunk] = []
         sources = [
-            (SOP_DIR,      "sop"),
-            (MANUAL_DIR,   "manual"),
-            (INCIDENT_DIR, "incident"),
+            (Path(sop_dir or cfg.SOP_DIR),           "sop"),
+            (Path(manual_dir or cfg.MANUAL_DIR),     "manual"),
+            (Path(incident_dir or cfg.INCIDENT_DIR), "incident"),
         ]
         for directory, source_type in sources:
             batch = self.load_directory(directory, source_type)
@@ -209,11 +232,13 @@ class DocumentLoader:
 
         raw_chunks = _chunk_text(text, self.chunk_size, self.chunk_overlap)
         title      = path.stem.replace("_", " ").replace("-", " ").title()
+        source_key = str(path.resolve())
 
         return [
             DocumentChunk(
-                chunk_id    = str(uuid.uuid4()),
-                source_file = str(path),
+                # Deterministic ID → re-running build-kb upserts instead of duplicating
+                chunk_id    = hashlib.sha1(f"{source_type}::{source_key}::{idx}::{chunk}".encode()).hexdigest(),
+                source_file = source_key,
                 source_type = source_type,
                 title       = title,
                 content     = chunk,

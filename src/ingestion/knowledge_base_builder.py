@@ -4,8 +4,8 @@ Knowledge Base Builder — embeds documents and stores them in ChromaDB.
 Run once before using the investigation pipeline:
     python main.py build-kb
 
-After adding new documents, run again — existing chunks are upserted
-(no duplicates, no need to wipe the store).
+After adding new documents, run again — chunk IDs are deterministic and a
+re-indexed file replaces its previous chunks (no duplicates, no need to wipe).
 """
 
 from __future__ import annotations
@@ -72,20 +72,8 @@ class KnowledgeBaseBuilder:
             Dict of source_type → chunks indexed
         """
         if chunks is None:
-            loader = DocumentLoader()
-
-            # Optionally override directories
-            if sop_dir or manual_dir or incident_dir:
-                from config import settings as cfg_module
-                import config.settings as cfg_settings
-                if sop_dir:
-                    cfg_settings.SOP_DIR = Path(sop_dir)
-                if manual_dir:
-                    cfg_settings.MANUAL_DIR = Path(manual_dir)
-                if incident_dir:
-                    cfg_settings.INCIDENT_DIR = Path(incident_dir)
-
-            chunks = loader.load_all()
+            chunks = DocumentLoader().load_all(
+                sop_dir=sop_dir, manual_dir=manual_dir, incident_dir=incident_dir)
 
         if not chunks:
             logger.warning("No chunks to index — knowledge base not updated")
@@ -140,6 +128,19 @@ class KnowledgeBaseBuilder:
             embedding_function = self.ef,
             metadata         = {"hnsw:space": "cosine"},
         )
+
+        # Replace any previous version of these files (handles edited/shortened docs)
+        for src in {c.source_file for c in chunks}:
+            try:
+                col.delete(where={"source_file": src})
+            except Exception:
+                pass
+
+        # De-duplicate within this batch (identical chunk content in the same file)
+        unique: dict[str, DocumentChunk] = {}
+        for c in chunks:
+            unique.setdefault(c.chunk_id, c)
+        chunks = list(unique.values())
 
         ids       = [c.chunk_id for c in chunks]
         documents = [c.content  for c in chunks]

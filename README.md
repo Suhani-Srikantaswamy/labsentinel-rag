@@ -16,7 +16,7 @@ LabSentinel-RAG investigates lab safety incidents automatically using a 5-stage 
 |-------|-------------|
 | **1. Input** | Upload any lab manual (PDF/DOCX/TXT) + incident video (any length) |
 | **2. Video Analysis** | Gemini Vision analyses every frame using a structured safety checklist |
-| **3. RAG Retrieval** | Retrieves the most relevant passages from your manual for each event |
+| **3. RAG Retrieval** | Indexes your uploaded manual and retrieves its most relevant passages (plus the knowledge base) for each event |
 | **4. LLM Reasoning** | Confirms violations, cites the exact rule, gives corrective actions |
 | **5. Report** | Timestamped HTML + PDF report — every violation linked to exact video second |
 
@@ -78,7 +78,13 @@ python main.py build-kb
 python app.py
 ```
 
-Open **http://localhost:7860**
+Open **http://localhost:7860** (or run `python main.py demo`)
+
+### 6. Or use the CLI
+
+```bash
+python main.py investigate path/to/video.mp4 --manual path/to/lab_manual.pdf
+```
 
 ---
 
@@ -95,10 +101,8 @@ Open **http://localhost:7860**
 
 | File | Description |
 |------|-------------|
-| `sample_files/chemistry_lab_manual.txt` | Full chemistry lab safety manual (PPE, acids, fume hoods, waste) |
-| `sample_files/biology_lab_manual.txt` | BSL-2 biology/microbiology lab manual (biosafety, BSC, sharps) |
-| `scripts/create_sample_video.py` | Generates a synthetic 96s lab incident video with 6 violations |
-| `data/sops/` | Sample SOPs for knowledge base |
+| `data/sops/` | Sample SOPs (general lab safety, chemical handling) — also usable as an uploaded manual |
+| `data/manuals/` | Sample equipment manual (centrifuge) |
 | `data/incidents/` | Sample historical incident records |
 
 ---
@@ -112,7 +116,7 @@ All links confirmed working:
 | [Fume Hood Safety (4min)](https://www.youtube.com/watch?v=PZRQMK6udZs) | [MIT Chemistry Manual](https://chemistry.mit.edu/wp-content/uploads/2026/01/2026-Chemical-Hygiene-Manual.pdf) | Fume hood, PPE |
 | [Lab Safety DOs & DON'Ts (8min)](https://www.youtube.com/watch?v=saXFQR86ziM) | [MIT Safety Rules](https://web.mit.edu/5.310/www/safety.pdf) | Multiple violations |
 | [Lab Safety Training (40min)](https://www.youtube.com/watch?v=TlhVR0xQLJQ) | [UC Davis Lab Manual](https://chemistry.ucdavis.edu/sites/g/files/dgvnsk196/files/inline-files/CHE%202B%20Student%20Lab%20Manual%20Spring%202023.pdf) | Full training |
-| [Biosafety Cabinet (4min)](https://www.youtube.com/watch?v=KSH_aaQSNyE) | `sample_files/biology_lab_manual.txt` | Biological safety |
+| [Biosafety Cabinet (4min)](https://www.youtube.com/watch?v=KSH_aaQSNyE) | Any BSL-2 biosafety manual | Biological safety |
 
 ---
 
@@ -135,8 +139,6 @@ labsentinel-rag/
 │   ├── sops/               # Your lab SOPs (add your own here)
 │   ├── manuals/            # Equipment manuals
 │   └── incidents/          # Historical incident records
-├── sample_files/           # Ready-to-use sample lab manuals
-├── scripts/                # Sample video generator
 └── tests/                  # Unit tests (pytest)
 ```
 
@@ -148,11 +150,16 @@ All settings via `.env` — nothing hardcoded:
 
 ```bash
 # Model
-LABSENTINEL_GEMINI_MODEL=gemini-3.5-flash-lite   # vision model
+LABSENTINEL_GEMINI_MODEL=gemini-3.5-flash        # vision model
+
+# Reliability
+LABSENTINEL_THINKING_HEADROOM=3072  # output tokens reserved for model "thinking" (prevents cut-off JSON)
+LABSENTINEL_REQUEST_TIMEOUT=120     # seconds per API call
+LABSENTINEL_TRANSIENT_RETRIES=4     # retries on 503 / timeouts
 
 # Video analysis
-LABSENTINEL_FRAME_RATE=3          # analyse 1 frame every N seconds
-LABSENTINEL_MAX_FRAMES=60         # total frame cap
+LABSENTINEL_FRAME_RATE=6          # baseline: 1 frame every N seconds (spread evenly over the video)
+LABSENTINEL_MAX_FRAMES=24         # total frame cap — raise for long videos
 LABSENTINEL_MOTION_THRESHOLD=10.0 # motion sensitivity
 
 # Retrieval
@@ -186,4 +193,4 @@ pytest tests/ -v
 
 ## Acknowledgements
 
-Built with: Google Gemini, ChromaDB, SentenceTransformers, Gradio, LangChain, ReportLab
+Built with: Google Gemini, ChromaDB, SentenceTransformers, Gradio, ReportLab

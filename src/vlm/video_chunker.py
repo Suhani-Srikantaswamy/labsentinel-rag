@@ -7,7 +7,9 @@ Accuracy improvements over naive uniform sampling:
   3. Scene-change detection      — catches abrupt scene cuts / camera switches
   4. First-frame guarantee       — always samples the very first frame of every scene/chunk
   5. Overlap between chunks      — 2-second overlap prevents missing events at chunk boundaries
-  6. No frame deduplication      — slightly redundant frames are fine; missing frames are not
+  6. Coverage guarantee          — ~75% of each chunk's budget is spread evenly across the
+                                   whole chunk; motion frames only use the remainder and are
+                                   rate-limited, so bursts can't starve the rest of the video
 """
 
 from __future__ import annotations
@@ -85,10 +87,10 @@ def extract_frames_chunked(
 
     # ── Proportional frame budget per chunk ───────────────────────────────────
     total_span = sum(end - start for start, end in chunks)
-    budgets = [max(2, round(max_frames * (end - start) / total_span))
+    budgets = [max(1, round(max_frames * (end - start) / total_span))
                for start, end in chunks]
     # Trim to max_frames
-    while sum(budgets) > max_frames:
+    while sum(budgets) > max_frames and max(budgets) > 0:
         budgets[budgets.index(max(budgets))] -= 1
 
     # ── Extract ───────────────────────────────────────────────────────────────
@@ -125,6 +127,15 @@ def extract_frames_chunked(
     return all_frames
 
 
+# Share of each chunk's frame budget reserved for evenly spaced frames (coverage);
+# the rest may be spent on motion / scene-change frames.
+_UNIFORM_SHARE = 0.75
+# Minimum spacing between an event-triggered frame and any other sampled frame,
+# so a burst of motion can't eat the whole budget in one second.
+_MIN_EVENT_GAP_SEC = 2.0
+_ANALYSIS_SIZE = (160, 90)   # motion/scene detection runs on a thumbnail (much faster)
+
+
 def _extract_chunk(
     video_path: str,
     start_sec: float,
@@ -136,23 +147,41 @@ def _extract_chunk(
     fps: float,
 ) -> list[dict]:
     """
-    Extract frames from [start_sec, end_sec] using three triggers:
-      1. Uniform interval (every sample_rate seconds)
-      2. High motion  (mean pixel diff > motion_thr)
-      3. Scene change (histogram correlation drop < 0.6)
-    Always includes the very first frame of the chunk.
+    Extract frames from [start_sec, end_sec] with guaranteed coverage:
+      1. Evenly spaced frames across the WHOLE chunk (≈75% of the budget).
+         Spacing is max(sample_rate, chunk_length / uniform_budget), so the
+         budget always stretches to the end of the chunk.
+      2. Extra frames on high motion or scene change (remaining budget),
+         at least 2s away from any other sampled frame.
+    The first frame of the chunk is always included.
     """
+    if max_frames <= 0:
+        return []
+
+    span = max(end_sec - start_sec, 1e-6)
+    uniform_budget = max(1, min(max_frames, round(max_frames * _UNIFORM_SHARE)))
+    event_budget = max_frames - uniform_budget
+    # If uniform sampling at sample_rate needs fewer frames than budgeted, give the rest to events
+    natural_uniform = int(span // max(sample_rate, 1e-6)) + 1
+    if natural_uniform < uniform_budget:
+        event_budget += uniform_budget - natural_uniform
+        uniform_budget = natural_uniform
+    uniform_interval_sec = max(float(sample_rate), span / uniform_budget)
+    interval = max(1, int(round(fps * uniform_interval_sec)))
+    min_gap_frames = int(fps * _MIN_EVENT_GAP_SEC)
+
     cap         = cv2.VideoCapture(video_path)
     start_frame = int(start_sec * fps)
     end_frame   = int(end_sec   * fps)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    interval   = max(1, int(fps * sample_rate))
     extracted: list[dict] = []
-    prev_gray  = None
+    n_uniform  = 0
+    n_event    = 0
+    last_sampled_fi = -10**9
+    prev_small = None
     prev_hist  = None
     fi         = start_frame
-    is_first   = True
 
     while cap.isOpened() and fi < end_frame and len(extracted) < max_frames:
         ret, frame = cap.read()
@@ -160,30 +189,26 @@ def _extract_chunk(
             break
 
         local_fi = fi - start_frame
-        gray     = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small = cv2.cvtColor(cv2.resize(frame, _ANALYSIS_SIZE, interpolation=cv2.INTER_AREA),
+                             cv2.COLOR_BGR2GRAY)
+        hist = cv2.calcHist([small], [0], None, [64], [0, 256])
+        cv2.normalize(hist, hist)
 
-        # Trigger 1: uniform interval
-        sample = (local_fi % interval == 0)
-
-        # Trigger 2: first frame of chunk — always sample
-        if is_first:
-            sample   = True
-            is_first = False
-
-        # Trigger 3: motion detection
-        if prev_gray is not None and not sample:
-            diff = cv2.absdiff(prev_gray, gray)
-            if float(np.mean(diff)) > motion_thr:
-                sample = True
-
-        # Trigger 4: scene change via histogram correlation
-        if prev_hist is not None and not sample:
-            hist = cv2.calcHist([gray], [0], None, [64], [0, 256])
-            cv2.normalize(hist, hist)
+        sample = False
+        # Trigger 1: uniform grid (always includes the chunk's first frame)
+        if local_fi % interval == 0 and n_uniform < uniform_budget:
+            sample = True
+            n_uniform += 1
+        # Triggers 2/3: motion or scene change, rate-limited
+        elif (n_event < event_budget and prev_small is not None
+              and fi - last_sampled_fi >= min_gap_frames
+              and (local_fi % interval) <= interval - min_gap_frames):   # not right before a grid frame
+            motion = float(np.mean(cv2.absdiff(prev_small, small)))
             corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
-            if corr < 0.60:   # low correlation = scene change
+            if motion > motion_thr or corr < 0.60:
                 sample = True
-                logger.debug(f"Scene change detected @ {fi/fps:.1f}s (corr={corr:.2f})")
+                n_event += 1
+                logger.debug(f"Event frame @ {fi/fps:.1f}s (motion={motion:.1f}, corr={corr:.2f})")
 
         if sample:
             ts      = round(fi / fps, 2)
@@ -194,7 +219,7 @@ def _extract_chunk(
             )
             fname      = f"frame_{fi:07d}_{ts:.2f}s.jpg"
             fpath      = str(Path(output_dir) / fname)
-            cv2.imwrite(fpath, resized, [cv2.IMWRITE_JPEG_QUALITY, 90])   # 90 quality for accuracy
+            cv2.imwrite(fpath, resized, [cv2.IMWRITE_JPEG_QUALITY, 90])
 
             with open(fpath, "rb") as fh:
                 b64 = base64.b64encode(fh.read()).decode("utf-8")
@@ -205,12 +230,10 @@ def _extract_chunk(
                 "frame_path":    fpath,
                 "base64":        b64,
             })
+            last_sampled_fi = fi
 
-        # Update reference frames
-        prev_gray = gray
-        hist_now  = cv2.calcHist([gray], [0], None, [64], [0, 256])
-        cv2.normalize(hist_now, hist_now)
-        prev_hist = hist_now
+        prev_small = small
+        prev_hist  = hist
         fi += 1
 
     cap.release()
