@@ -11,6 +11,7 @@ The uploaded lab manual drives everything — no hardcoded rules anywhere.
 """
 
 from __future__ import annotations
+import time
 from pathlib import Path
 
 from loguru import logger
@@ -68,6 +69,8 @@ class LabSentinelPipeline:
             if verbose:
                 console.print(f"  [dim]{pct*100:.0f}%[/dim] {msg}")
 
+        from src.utils.llm_client import request_count
+        t0, req0 = time.time(), request_count()
         _prog(0.01, "Starting investigation …")
 
         # ── Stage 2: Video Analysis ───────────────────────────────────────────
@@ -103,15 +106,15 @@ class LabSentinelPipeline:
         # ── Stage 4: LLM Reasoning ────────────────────────────────────────────
         _prog(0.68, "Stage 4 — Reasoning over violations …")
         self.retriever.clear_session_manual()
-        violations: list[Violation] = []
         self.reasoner.failed_events = 0
-        for i, event in enumerate(violation_events):
-            evidence  = all_evidence.get(event.event_id, {})
-            found = self.reasoner.analyse_event_all(event, evidence, manual_text)
-            violations.extend(found)
-            _prog(0.68 + (i + 1) / max(n, 1) * 0.18,
-                  (f"✗ {len(found)} violation(s) confirmed" if found else "✓ No new violation")
-                  + f" @ {event.timestamp_sec:.1f}s")
+        violations: list[Violation] = self.reasoner.analyse_events(
+            violation_events, all_evidence, manual_text,
+            on_progress=lambda p, m: _prog(0.68 + p * 0.18, m),
+        )
+        from src.reasoning.violation_reasoner import consolidate_by_person
+        violations, folded = consolidate_by_person(violations)
+        if folded:
+            logger.info(f"Folded {folded} repeat violation(s) into the same person's earlier violation")
 
         # ── Stage 5: Report ───────────────────────────────────────────────────
         _prog(0.87, "Stage 5 — Building report …")
@@ -129,7 +132,9 @@ class LabSentinelPipeline:
                 "step failed — they are listed as unverified violations.")
         report.metadata["warnings"] = warnings
         report.metadata["failed_frames"] = video_result.failed_frames
-        report.metadata["repeats_merged"] = video_result.repeats_merged
+        report.metadata["repeats_merged"] = video_result.repeats_merged + folded
+        report.metadata["analysis_seconds"] = round(time.time() - t0, 1)
+        report.metadata["api_requests"] = request_count() - req0
         output_paths = ReportGenerator(output_dir=output_dir).generate_all(report)
         _prog(1.0, f"Done — {report.total_violations} violations, "
                    f"risk: {report.overall_risk_level.upper()}")

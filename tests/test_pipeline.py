@@ -478,12 +478,17 @@ class TestManualLabInference:
 
 
 class TestLLMClientTruncation:
-    def test_truncated_reply_retried_then_raises(self, monkeypatch):
-        from src.utils import llm_client as lc
+    def _client(self, lc, keys=("k1",)):
         c = lc.GeminiClient.__new__(lc.GeminiClient)
-        c._keys, c._idx = ["k"], 0
+        c._keys, c.lane, c.model = list(keys), 0, "m"
+        c.pool = lc.KeyPool(list(keys))
+        return c
+
+    def test_truncated_reply_retried_then_raises(self):
+        from src.utils import llm_client as lc
+        c = self._client(lc)
         calls = []
-        def fake_call(prompt, images, temperature, max_tokens):
+        def fake_call(key, prompt, images, temperature, max_tokens):
             calls.append(max_tokens)
             return lc.LLMResponse('{"a": ', truncated=True)
         c._call = fake_call
@@ -494,8 +499,7 @@ class TestLLMClientTruncation:
     def test_transient_error_retried(self, monkeypatch):
         from src.utils import llm_client as lc
         monkeypatch.setattr(lc.time, "sleep", lambda s: None)
-        c = lc.GeminiClient.__new__(lc.GeminiClient)
-        c._keys, c._idx = ["k"], 0
+        c = self._client(lc)
         n = {"i": 0}
         def fake_call(*a):
             n["i"] += 1
@@ -504,6 +508,45 @@ class TestLLMClientTruncation:
             return lc.LLMResponse('{"ok": true}')
         c._call = fake_call
         assert c.chat("p").json() == {"ok": True}
+
+
+class TestKeyPool:
+    DAILY = ("429 RESOURCE_EXHAUSTED ... 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' ... "
+             "{'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '67784s'}")
+    MINUTE = "429 RESOURCE_EXHAUSTED 'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier' 'retryDelay': '20s'"
+
+    def test_cooldown_parsing(self):
+        from src.utils.llm_client import _quota_cooldown_seconds
+        assert _quota_cooldown_seconds(self.DAILY) == (67784.0, "daily quota used up")
+        secs, why = _quota_cooldown_seconds(self.MINUTE)
+        assert why == "per-minute limit" and 20 <= secs <= 22
+
+    def test_exhausted_key_skipped_next_time(self):
+        from src.utils import llm_client as lc
+        c = TestLLMClientTruncation()._client(lc, keys=("k1", "k2"))
+        used = []
+        def fake_call(key, *a):
+            used.append(key)
+            if key == "k1":
+                raise RuntimeError(self.DAILY)
+            return lc.LLMResponse("{}")
+        c._call = fake_call
+        c.chat("a"); c.chat("b")
+        assert used == ["k1", "k2", "k2"]                 # k1 tried once, then skipped
+        assert c.pool.available_count() == 1
+
+    def test_all_exhausted_is_fatal(self):
+        from src.utils import llm_client as lc
+        c = TestLLMClientTruncation()._client(lc, keys=("k1",))
+        c._call = lambda key, *a: (_ for _ in ()).throw(RuntimeError(self.DAILY))
+        with pytest.raises(lc.FatalLLMError, match="exhausted"):
+            c.chat("a")
+
+    def test_lanes_spread_across_usable_keys(self):
+        from src.utils.llm_client import KeyPool
+        pool = KeyPool(["k1", "k2", "k3", "k4"])
+        pool.rest("k1", 3600, "daily"); pool.rest("k2", 3600, "daily")
+        assert {pool.pick(0), pool.pick(1)} == {"k3", "k4"}
 
 
 class TestReportEscaping:
@@ -690,3 +733,73 @@ class TestSceneOnlyIssues:
                                                  potential_violation=True, people=ppl, scene_issues=sc)
         out, merged = _merge_repeat_sightings([mk(1, 36, p1, s1), mk(2, 42, p2, s2)])
         assert len(out) == 1 and merged == 1
+
+
+class TestWorksForAnyVideo:
+    def test_aspect_ratio_kept_and_no_upscaling(self):
+        from src.vlm.video_chunker import _fit_size
+        assert _fit_size(1920, 1080) == (1280, 720)
+        assert _fit_size(1080, 1920) == (405, 720)       # portrait phone video, not stretched
+        assert _fit_size(640, 480) == (640, 480)         # small 4:3 video, not upscaled
+
+    def test_frame_budget_scales_with_length(self):
+        from src.vlm.video_chunker import auto_frame_budget
+        assert auto_frame_budget(60) == 24               # short clip → minimum
+        assert auto_frame_budget(516) == 52              # 8.6 min
+        assert auto_frame_budget(4 * 3600) == 90         # long CCTV → capped
+
+    def test_video_without_frame_count_is_counted(self, tmp_path, monkeypatch):
+        import cv2, numpy as np
+        from src.vlm import video_chunker as vc
+        path = tmp_path / "v.mp4"
+        w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+        for _ in range(25):
+            w.write(np.zeros((48, 64, 3), np.uint8))
+        w.release()
+        real = cv2.VideoCapture
+        class NoCount:
+            def __init__(self, p): self.c = real(p)
+            def get(self, prop): return 0 if prop == cv2.CAP_PROP_FRAME_COUNT else self.c.get(prop)
+            def __getattr__(self, n): return getattr(self.c, n)
+        monkeypatch.setattr(vc.cv2, "VideoCapture", NoCount)
+        assert vc.probe_video(str(path))[1] == 25
+
+    def test_issue_synonyms_are_not_overmatched(self):
+        from src.vlm.video_analyzer import _norm_issue
+        assert _norm_issue("no goggles") == "missing_eye_protection"
+        assert _norm_issue("eyewash station blocked") == "eyewash_station_blocked"   # NOT missing goggles
+        assert _norm_issue("missing hard hat") == "missing_hard_hat"                  # model's own key kept
+        assert _norm_issue("drinking coffee at bench") == "eating_drinking"
+
+    def test_heuristic_people_matching(self):
+        from src.vlm.video_analyzer import _heuristic_group_people
+        info = {"P1001": {"app": "blue lab coat short dark hair"}, "P2001": {"app": "blue lab coat, short dark hair, glasses"},
+                "P2002": {"app": "red jumper long blonde hair"}}
+        groups = _heuristic_group_people(["P1001", "P2001", "P2002"], info, set())
+        assert sorted(map(sorted, groups)) == [["P1001", "P2001"], ["P2002"]]
+        # Never merge two people seen in the same frame
+        groups = _heuristic_group_people(["P1001", "P2001"], info, {frozenset(("P1001", "P2001"))})
+        assert len(groups) == 2
+
+
+class TestConsolidateByPerson:
+    def _v(self, t, vtype, pids, issues, sev="medium"):
+        from src.utils.models import Violation
+        ev = DetectedEvent(event_id=f"e{t}", timestamp_sec=t, frame_index=int(t), description="x", potential_violation=True)
+        return Violation(violation_id=f"v{t}", event=ev, violation_type=vtype, rule_violated="r",
+                         explanation="Seen.", severity=sev, issues=issues, person_ids=pids)
+
+    def test_same_person_same_type_folded(self):
+        from src.reasoning.violation_reasoner import consolidate_by_person
+        out, folded = consolidate_by_person([
+            self._v(190, "PPE", ["P5"], ["missing_gloves"]),
+            self._v(220, "PPE", ["P5"], ["missing_eye_protection"], sev="high"),
+            self._v(230, "PPE", ["P6"], ["missing_gloves"]),          # different person → kept
+            self._v(240, "Food/Drink", ["P5"], ["eating_drinking"]),  # different type → kept
+            self._v(250, "Other", ["P5"], ["other"]),
+            self._v(260, "Other", ["P5"], ["other"]),                 # "Other" never merged
+        ])
+        assert folded == 1 and len(out) == 5
+        p5 = out[0]
+        assert p5.issues == ["missing_gloves", "missing_eye_protection"] and p5.severity == "high"
+        assert 220 in p5.repeat_times() and "Also at 03:40" in p5.explanation

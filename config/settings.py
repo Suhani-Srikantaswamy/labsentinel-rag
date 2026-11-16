@@ -76,19 +76,24 @@ class VideoConfig(BaseModel):
     frame_sample_rate: int = Field(
         default_factory=lambda: int(os.getenv("LABSENTINEL_FRAME_RATE", "6"))
     )
-    # Keep the frame budget tight enough for a 3–4 minute incident to finish in under a few minutes.
+    # Frame budget. 0 / "auto" = scale with video length:
+    #   one frame every LABSENTINEL_AUTO_FRAME_SPACING seconds, clamped to
+    #   [LABSENTINEL_AUTO_MIN_FRAMES, LABSENTINEL_AUTO_MAX_FRAMES]
     max_frames: int = Field(
-        default_factory=lambda: int(os.getenv("LABSENTINEL_MAX_FRAMES", "24"))
+        default_factory=lambda: int(os.getenv("LABSENTINEL_MAX_FRAMES", "0").replace("auto", "0") or 0)
     )
+    auto_frame_spacing_sec: float = float(os.getenv("LABSENTINEL_AUTO_FRAME_SPACING", "10"))
+    auto_min_frames: int = int(os.getenv("LABSENTINEL_AUTO_MIN_FRAMES", "24"))
+    auto_max_frames: int = int(os.getenv("LABSENTINEL_AUTO_MAX_FRAMES", "90"))
     # Process long videos in shorter chunks for better throughput and easier boundary handling.
     chunk_duration_sec: int = Field(
         default_factory=lambda: int(os.getenv("LABSENTINEL_CHUNK_SEC", "180"))
     )
-    # Resize frames before sending to API (saves tokens)
+    # Frames are scaled DOWN to fit inside this box, keeping the aspect ratio (no stretching)
     resize_width: int = int(os.getenv("LABSENTINEL_FRAME_WIDTH", "1280"))
     resize_height: int = int(os.getenv("LABSENTINEL_FRAME_HEIGHT", "720"))
-    # Motion detection threshold — lowered for higher sensitivity
-    # Lower = catches more subtle motion (someone removing a glove, etc.)
+    # Motion sensitivity. The detector adapts to each video's own noise level;
+    # this sets how far above that baseline counts as "motion" (lower = more sensitive).
     motion_threshold: float = float(os.getenv("LABSENTINEL_MOTION_THRESHOLD", "10.0"))
     supported_formats: list[str] = [".mp4", ".avi", ".mov", ".mkv", ".webm"]
 

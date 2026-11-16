@@ -1,0 +1,33 @@
+<div class="panel overview">
+  <div class="tiles">
+    <div class="tile">
+      <div class="lbl">Risk level</div>
+      <span class="risk-pill" style="background:{{ risk_color }}">{{ r.overall_risk_level|upper }}</span>
+    </div>
+    <div class="tile">
+      <div class="num">{{ r.total_violations }}</div><div class="lbl">Violations</div>
+      {% if r.total_violations %}<div class="sub">✓ {{ review.confirmed }} · ✗ {{ review.false_alarm }} · {{ review.pending }} pending</div>{% endif %}
+    </div>
+    <div class="tile">
+      <div class="num">{{ events|length }}</div><div class="lbl">Flagged moments</div>
+      {% if repeats_merged %}<div class="sub">+{{ repeats_merged }} repeat sighting(s)</div>{% endif %}
+    </div>
+    <div class="tile">
+      <div class="num">{{ frames_sampled }}</div><div class="lbl">Frames analysed</div>
+      <div class="sub">{{ duration_label }} of video</div>
+    </div>
+  </div>
+  <div class="chart">
+    {{ chart_svg }}
+    <div class="legend">
+      {% for sev, col in legend %}<span style="--c:{{ col }}">{{ sev|capitalize }}</span>{% endfor %}
+      <span style="--c:{{ false_alarm_color }}">False alarm</span>
+      <span class="hollow">Seen again</span>
+    </div>
+  </div>
+  {% for w in warnings %}<div class="warning-banner">⚠ {{ w }}</div>{% endfor %}
+  {% if repeats_merged %}
+  <div class="note">ℹ {{ repeats_merged }} repeat sighting(s) of an already-flagged person and issue were not flagged again — see "Also seen at" on each violation.</div>
+  {% endif %}
+  {% if timing %}<div class="note">⏱ {{ timing }}</div>{% endif %}
+</div>

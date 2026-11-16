@@ -216,11 +216,24 @@ class ReportGenerator:
         report: InvestigationReport,
         interactive: bool = False,
         include_player: bool = False,
+        embedded: bool = False,
     ) -> str:
         """
         interactive    — show Confirm / False-alarm buttons (web UI only)
         include_player — embed a <video> the timestamps seek (standalone file)
+        embedded       — body only, no page header / overview (the web UI shows those
+                         next to its own video player)
         """
+        return _env.get_template("report.html.j2").render(
+            **self._context(report), interactive=interactive, embedded=embedded,
+            include_player=include_player,
+            video_uri=self._video_uri(report.video_path) if include_player else None)
+
+    def render_overview_html(self, report: InvestigationReport) -> str:
+        """Risk / counts / timeline chart / warnings — shown beside the evidence player in the UI."""
+        return _env.get_template("overview_page.html.j2").render(**self._context(report))
+
+    def _context(self, report: InvestigationReport) -> dict:
         review_by_event = {v.event.event_id: v.review_status for v in report.violations}
         events = []
         for e in report.timeline:
@@ -253,9 +266,16 @@ class ReportGenerator:
                 "review_color": REVIEW_COLORS.get(v.review_status, REVIEW_COLORS["pending"]),
             })
 
-        template = _env.get_template("report.html.j2")
-        return template.render(
+        timing = ""
+        t = report.metadata.get("analysis_seconds")
+        if t:
+            timing = f"Analysed in {int(t // 60)}m {int(t % 60):02d}s"
+            if report.metadata.get("api_requests"):
+                timing += f" using {report.metadata['api_requests']} API request(s)"
+        return dict(
             r=report,
+            duration_label=_fmt_ts(report.metadata.get("duration_sec", 0) or 0),
+            timing=timing,
             generated_at=report.generated_at.strftime("%Y-%m-%d %H:%M UTC"),
             risk_color=severity_color(report.overall_risk_level),
             frames_sampled=report.metadata.get("frames_sampled", "-"),
@@ -267,9 +287,6 @@ class ReportGenerator:
             chart_svg=Markup(timeline_svg(report)),
             legend=[(s, SEVERITY_COLORS[s]) for s in SEVERITY_ORDER],
             false_alarm_color=FALSE_ALARM_COLOR,
-            interactive=interactive,
-            include_player=include_player,
-            video_uri=self._video_uri(report.video_path) if include_player else None,
         )
 
     # Backwards-compatible name

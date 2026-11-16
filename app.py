@@ -292,7 +292,7 @@ def investigate(video_file, video_url, manual_files,
             "Get a FREE Google Gemini key at https://aistudio.google.com/apikey",
             "Add to .env:  GOOGLE_API_KEY=your-key",
             "Restart the app: python app.py",
-        ]), "{}", None, _stat("❌", "No API key"), "", _load_history(5), None
+        ]), "", "{}", None, _stat("❌", "No API key"), _load_history(5), None, gr.update(visible=False)
 
     video_path = None; tmp_dir = None
     if video_url and video_url.strip():
@@ -306,11 +306,11 @@ def investigate(video_file, video_url, manual_files,
                 video_url.strip(),
                 progress_cb=lambda p, m: progress(0.02 + p * 0.10, desc=m))
             if err:
-                return _err("Download Failed", [err, "Try uploading the video directly."]), "{}", None, _stat("❌", "Download failed"), "", _load_history(5), None
+                return _err("Download Failed", [err, "Try uploading the video directly."]), "", "{}", None, _stat("❌", "Download failed"), _load_history(5), None, gr.update(visible=False)
     else:
         video_path = _coerce_file_path(video_file)
         if not video_path:
-            return _err("No Video", ["Upload a video file or paste a URL."]), "{}", None, _stat("⚠️", "No input"), "", _load_history(5), None
+            return _err("No Video", ["Upload a video file or paste a URL."]), "", "{}", None, _stat("⚠️", "No input"), _load_history(5), None, gr.update(visible=False)
 
     progress(0.13, desc="Reading lab manual …")
     manual_text  = _combine_manuals(manual_files) if manual_files else ""
@@ -343,18 +343,18 @@ def investigate(video_file, video_url, manual_files,
                 "This normally means the project does not have Gemini enabled or billing is not active.",
                 "Open https://aistudio.google.com, enable the correct project, turn on billing if needed, and add a valid key to .env.",
                 "Then restart the app and try again.",
-            ]), "{}", None, _stat("❌", "Gemini project blocked"), "", _load_history(5), None
+            ]), "", "{}", None, _stat("❌", "Gemini project blocked"), _load_history(5), None, gr.update(visible=False)
         if "All " in err and "Gemini API key" in err and "exhausted" in err.lower():
             return _err("All API keys are exhausted", [
                 "Every configured Gemini API key has reached its daily quota.",
                 "Add another key in .env (GOOGLE_API_KEY_2=..., GOOGLE_API_KEY_3=...) or wait for the quota to reset.",
                 "You can also reduce Max Frames in Advanced Settings to use fewer requests.",
-            ]), "{}", None, _stat("❌", "All API keys exhausted"), "", _load_history(5), None
-        return _err("Investigation Failed", [err]), "{}", None, _stat("❌", err[:80]), "", _load_history(5), None
+            ]), "", "{}", None, _stat("❌", "All API keys exhausted"), _load_history(5), None, gr.update(visible=False)
+        return _err("Investigation Failed", [err]), "", "{}", None, _stat("❌", err[:80]), _load_history(5), None, gr.update(visible=False)
 
     report = holder.get("report")
     if not report:
-        return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5), None
+        return _err("No Result", ["Pipeline returned no report."]), "", "{}", None, _stat("❌", "No report"), _load_history(5), None, gr.update(visible=False)
 
     video_lab_type = _majority_video_lab_type(report.timeline)
 
@@ -380,7 +380,7 @@ def investigate(video_file, video_url, manual_files,
     if tmp_dir: shutil.rmtree(tmp_dir, ignore_errors=True)
     outputs = _report_outputs(report, "Complete")
     progress(1.0, desc="Done!")
-    return (*outputs, _playable_video(report.video_path))
+    return (*outputs, _playable_video(report.video_path), gr.update(visible=True))
 
 # ── KB builder ────────────────────────────────────────────────────────────────
 
@@ -418,8 +418,42 @@ def build_kb(sop_f, man_f, inc_f, sop_d, man_d, inc_d, reset, progress=gr.Progre
     except Exception as e:
         logger.exception(e); return f"❌ Error: {e}"
 
+def _keys_table_html(statuses) -> str:
+    if not statuses:
+        return ""
+    rows = []
+    for st in statuses:
+        if st["available"]:
+            state = '<span style="color:#22c55e;font-weight:600">✅ available</span>'
+        else:
+            mins = st["free_in_sec"] // 60
+            when = f"{mins // 60}h {mins % 60}m" if mins >= 60 else f"{mins}m"
+            state = (f'<span style="color:#ef4444;font-weight:600">❌ {_html.escape(st["reason"] or "resting")}</span>'
+                     f' <span style="color:var(--ls-text3)">— free again in {when}</span>')
+        rows.append(f'<tr><td style="padding:7px 14px;border-bottom:1px solid var(--ls-border);color:var(--ls-text2);'
+                    f'font-size:0.84em">Key {st["index"]} (…{_html.escape(st["suffix"])})</td>'
+                    f'<td style="padding:7px 14px;border-bottom:1px solid var(--ls-border);font-size:0.84em">{state}</td></tr>')
+    n_ok = sum(1 for st in statuses if st["available"])
+    return (f'<h3 style="color:var(--ls-text);font-size:1.0em;font-weight:700;margin:22px 0 8px">'
+            f'API Keys — {n_ok} of {len(statuses)} available</h3>'
+            '<p style="color:var(--ls-text3);font-size:0.78em;margin:0 0 8px">Shows what this app has seen so far. '
+            'Click <b>Check API keys now</b> for a live check (uses one request per key). '
+            'Free-tier quotas reset at midnight Pacific time.</p>'
+            '<table style="width:100%;border-collapse:collapse;background:var(--ls-surface);'
+            'border:1px solid var(--ls-border);border-radius:10px;overflow:hidden">' + "".join(rows) + "</table>")
+
+
+def check_keys_now():
+    from src.utils.llm_client import probe_keys
+    try:
+        probe_keys()
+    except Exception as e:
+        logger.warning(f"Key check failed: {e}")
+    return get_status()
+
+
 def get_status():
-    from src.utils.llm_client import get_provider_info
+    from src.utils.llm_client import get_provider_info, key_status
     from config.settings import settings
     pi = get_provider_info()
     try:
@@ -462,10 +496,12 @@ def get_status():
   <table style="width:100%;border-collapse:collapse;background:var(--ls-surface);border:1px solid var(--ls-border);border-radius:10px;overflow:hidden">
     {row("Model", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{model}</code> &nbsp;<span style="font-size:0.78em;color:{"#22c55e" if is_free else "#f59e0b"};font-weight:600">{"FREE" if is_free else "PAID"}</span>')}
     {row("Frame sample rate", f'Every <code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.video.frame_sample_rate}s</code>')}
-    {row("Max frames per video", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.video.max_frames}</code>')}
+    {row("Max frames per video", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.video.max_frames or "auto"}</code>' + ('' if settings.video.max_frames else f' &nbsp;<span style="font-size:0.78em;color:var(--ls-text3)">1 per {settings.video.auto_frame_spacing_sec:g}s, {settings.video.auto_min_frames}–{settings.video.auto_max_frames}</span>'))}
+    {row("Speed", f'{os.getenv("LABSENTINEL_FRAMES_PER_REQUEST", "6")} frames per request · up to {os.getenv("LABSENTINEL_PARALLEL_REQUESTS", "4")} requests in parallel')}
     {row("Embedding model", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.rag.embedding_model}</code> &nbsp;<span style="font-size:0.78em;color:var(--ls-text3)">runs locally</span>')}
     {row("Similarity threshold", f'<code style="background:var(--ls-surface2);padding:2px 6px;border-radius:4px;font-size:0.85em">{settings.rag.similarity_threshold}</code>')}
   </table>
+  {_keys_table_html(key_status())}
 </div>"""
     return html
 
@@ -485,7 +521,7 @@ def _report_outputs(report, status_prefix: str):
     """
     Save the report (JSON + standalone HTML + PDF, so metadata and review
     decisions persist) and build the 6 UI outputs:
-    (report_html, json, pdf, status, summary, history).
+    (report_html, overview_html, json, pdf, status, history).
     """
     from src.report.report_generator import ReportGenerator
     gen = ReportGenerator()
@@ -499,7 +535,8 @@ def _report_outputs(report, status_prefix: str):
         pdf = gen.to_pdf(report)
     except Exception as e:
         logger.warning(f"PDF failed: {e}")
-    html = gen.render_html(report, interactive=True)
+    html = gen.render_html(report, interactive=True, embedded=True)
+    overview = gen.render_overview_html(report)
     js = json.dumps(report.model_dump(mode="json"), indent=2, default=str)
     r = report.overall_risk_level
     rv = report.review_counts()
@@ -509,34 +546,16 @@ def _report_outputs(report, status_prefix: str):
         f"{status_prefix} — <b>{report.total_violations} violation(s)</b> | "
         f"Risk: <b style='color:{_risk_col(r)}'>{_html.escape(r.upper())}</b> | "
         f"{len(report.timeline)} events | {report.metadata.get('frames_sampled','?')} frames{reviewed}")
-    manual_label = report.metadata.get("manual_label") or "—"
-    return html, js, pdf, status_html, _summary_md(report, manual_label), _load_history(5)
+    t = report.metadata.get("analysis_seconds")
+    if t and status_prefix == "Complete":
+        status_html = status_html.replace("</div>", f" | ⏱ {int(t // 60)}m {int(t % 60):02d}s</div>")
+    return html, overview, js, pdf, status_html, _load_history(5)
 
 def _stat(icon, msg):
     return (f'<div style="padding:10px 14px;border-radius:8px;'
             f'background:var(--ls-surface2);border:1px solid var(--ls-border);'
             f'color:var(--ls-text2);font-size:0.88em;font-family:Inter,sans-serif">'
             f'{icon} {msg}</div>')
-
-def _summary_md(report, manual_label):
-    from src.report.report_generator import _fmt_ts
-    r = report.overall_risk_level
-    e = {"low":"🟢","medium":"🟡","high":"🟠","critical":"🔴"}.get(r,"⚪")
-    dur = _fmt_ts(report.metadata.get("duration_sec", 0))
-    lines = [f"## {e} Investigation Complete\n",
-             "| | |", "|---|---|",
-             f"| **Risk** | **{r.upper()}** |",
-             f"| **Violations** | {report.total_violations} |",
-             f"| **Reviewed** | ✓ {report.review_counts()['confirmed']} confirmed · ✗ {report.review_counts()['false_alarm']} false alarm · {report.review_counts()['pending']} pending |",
-             f"| **Events** | {len(report.timeline)} |",
-             f"| **Frames** | {report.metadata.get('frames_sampled','?')} |",
-             f"| **Duration** | {dur} |",
-             f"| **Manual** | {manual_label} |",
-             f"\n**{report.incident_summary}**"]
-    if report.key_findings:
-        lines.append("\n**Key Findings:**")
-        for f in report.key_findings: lines.append(f"- {f}")
-    return "\n".join(lines)
 
 def _err(title, tips):
     items = "".join(f"<li style='margin:5px 0;color:var(--ls-text2)'>{t}</li>" for t in tips)
@@ -562,17 +581,18 @@ def _resolve_report_path(report_path: str):
 
 def _load_history_report(report_path: str):
     if not report_path:
-        return PLACEHOLDER, "{}", None, _stat("⚠️", "No history item selected"), "", _load_history(5), None
+        return PLACEHOLDER, "", "{}", None, _stat("⚠️", "No history item selected"), _load_history(5), None, gr.update(visible=False)
     path = _resolve_report_path(report_path)
     if path is None:
-        return PLACEHOLDER, "{}", None, _stat("⚠️", "Invalid or missing history item"), "", _load_history(5), None
+        return PLACEHOLDER, "", "{}", None, _stat("⚠️", "Invalid or missing history item"), _load_history(5), None, gr.update(visible=False)
     try:
         from src.utils.models import InvestigationReport
         report = InvestigationReport.model_validate(json.loads(path.read_text()))
-        return (*_report_outputs(report, "Loaded historical report"), _playable_video(report.video_path))
+        return (*_report_outputs(report, "Loaded historical report"), _playable_video(report.video_path),
+                gr.update(visible=True))
     except Exception as e:
         logger.exception(e)
-        return PLACEHOLDER, "{}", None, _stat("❌", f"Could not load report: {_html.escape(str(e))}"), "", _load_history(5), None
+        return PLACEHOLDER, "", "{}", None, _stat("❌", f"Could not load report: {_html.escape(str(e))}"), _load_history(5), None, gr.update(visible=False)
 
 
 _REVIEW_STATES = {"confirmed", "false_alarm", "pending"}
@@ -588,7 +608,7 @@ def review_violation(payload: str):
     from src.report.report_generator import report_json_path
 
     def _keep(msg):
-        return (gr.skip(), gr.skip(), gr.skip(), _stat("⚠️", msg), gr.skip(), gr.skip())
+        return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), _stat("⚠️", msg), gr.skip())
 
     try:
         report_id, violation_id, status = str(payload or "").split("|", 2)
@@ -745,8 +765,8 @@ body {
   text-align: center !important;
 }
 .gradio-container {
-  width: min(1200px, calc(100vw - 28px)) !important;
-  max-width: 1200px !important;
+  width: min(1640px, calc(100vw - 28px)) !important;
+  max-width: 1640px !important;
   margin: 20px auto !important;
   padding: 0 !important;
   display: block !important;
@@ -833,8 +853,28 @@ body {
   border-right: 1px solid var(--ls-border) !important;
   padding: 12px 10px 12px 12px !important;
   overflow-y: auto !important;
-  flex-shrink: 0 !important;
-  min-width: 320px !important;
+  /* Fixed-width sidebar so the results get the rest of the page */
+  flex: 0 0 340px !important;
+  width: 340px !important;
+  min-width: 300px !important;
+  max-width: 360px !important;
+}
+#results-row { gap: 14px !important; flex-wrap: wrap !important; margin-bottom: 14px !important; }
+#results-row > div { min-width: 320px !important; }
+/* Report text: keep Gradio's .prose typography from overriding the report's own styles */
+.ls-right .lsr h2 { font-size: 0.82em !important; margin: 0 0 10px !important; line-height: 1.3 !important;
+                    letter-spacing: 0.9px !important; color: #60a5fa !important; text-transform: uppercase !important;
+                    border: none !important; padding: 0 !important; font-weight: 700 !important; }
+.ls-right .lsr h3 { font-size: 1.0em !important; margin: 0 !important; line-height: 1.3 !important; color: #e2e8f0 !important; }
+.ls-right .lsr h4 { font-size: 0.74em !important; margin: 10px 0 4px !important; color: #94a3b8 !important; }
+.ls-right .lsr ul { margin: 0 !important; padding-left: 18px !important; }
+.ls-right .lsr li { font-size: 0.86em !important; margin: 4px 0 !important; color: #94a3b8 !important; line-height: 1.5 !important; }
+.ls-right .lsr p, .ls-right .lsr div, .ls-right .lsr span { line-height: 1.5; }
+.ls-right .lsr table { margin: 8px 0 0 !important; }
+.ls-right .lsr td, .ls-right .lsr th { border-left: none !important; border-right: none !important; }
+@media (max-width: 1000px) {
+  #investigate-row { flex-wrap: wrap !important; }
+  .ls-left { flex: 1 1 100% !important; width: 100% !important; max-width: none !important; }
 }
 
 /* Right content panel */
@@ -1220,7 +1260,7 @@ function lsCenter() {
   if (ga) {
     ga.style.cssText = [
       'display: block',
-      'width: min(1200px, calc(100vw - 28px))',
+      'width: min(1640px, calc(100vw - 28px))',
       'max-width: calc(100vw - 28px)',
       'margin: 0 auto'
     ].join(' !important;') + ' !important';
@@ -1328,34 +1368,39 @@ def create_app():
             # ── INVESTIGATE ────────────────────────────────────────────────
             with gr.TabItem("🔍  Investigate", elem_id="tab-investigate"):
                 with gr.Row(equal_height=False, elem_id="investigate-row"):
-                    with gr.Column(scale=4, min_width=320, elem_classes="ls-left"):
+                    with gr.Column(scale=3, min_width=300, elem_classes="ls-left"):
                         gr.HTML('<span class="ls-section-label">Step 1 — Lab Manual</span>')
                         manual_in = gr.File(label="Upload Lab Manual / SOP", file_count="multiple",
-                                            file_types=[".pdf",".docx",".txt",".md"])
+                                            file_types=[".pdf",".docx",".txt",".md"], height=120)
                         gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:4px 0 14px;line-height:1.5">'
                                 'PDF · DOCX · TXT. The AI reads it and applies its rules. No manual = universal rules.</p>')
                         gr.HTML('<span class="ls-section-label">Step 2 — Incident Video</span>')
-                        video_in = gr.Video(label="Upload Video", height=190)
+                        video_in = gr.Video(label="Upload Video", height=150)
                         url_in   = gr.Textbox(label="Or paste a URL",
                                               placeholder="https://youtube.com/watch?v=...", lines=1)
                         gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:4px 0 14px;line-height:1.5">'
                                 '⚡ Same URL cached — re-runs are instant.</p>')
                         with gr.Accordion("⚙  Advanced Settings", open=False):
-                            gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:0 0 10px">Leave 0 for .env defaults</p>')
+                            gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:0 0 10px">Leave 0 for automatic (scales with video length)</p>')
                             with gr.Row():
                                 sr_in = gr.Number(label="Frame rate (s)", value=0, minimum=0, maximum=60, precision=0)
                                 mf_in = gr.Number(label="Max frames", value=0, minimum=0, maximum=500, precision=0)
                             chunk_in = gr.Number(label="Chunk size (s)", value=0, minimum=0, maximum=7200, precision=0)
                         run_btn    = gr.Button("🚀  Run Investigation", variant="primary", size="lg", elem_id="run-btn")
                         status_out = gr.HTML(value='<div style="height:36px"></div>')
+                        pdf_out = gr.File(label="📥 Download PDF Report", elem_classes="pdf-btn", height=64)
                         gr.HTML('<div style="margin-top:16px"><span class="ls-section-label">Recent Investigations</span></div>')
                         history_out = gr.HTML(value=_load_history(5), elem_classes="ls-history-wrap")
 
-                    with gr.Column(scale=7, min_width=500, elem_classes="ls-right"):
-                        summary_out = gr.Markdown()
-                        evidence_video = gr.Video(
-                            label="🎬 Evidence Player — click any timestamp, marker or screenshot in the report to jump there",
-                            elem_id="evidence-video", interactive=False, height=320)
+                    with gr.Column(scale=9, min_width=520, elem_classes="ls-right"):
+                        # Results header: evidence player beside the overview (risk, counts, timeline)
+                        with gr.Row(equal_height=False, visible=False, elem_id="results-row") as results_row:
+                            with gr.Column(scale=6, min_width=320):
+                                evidence_video = gr.Video(
+                                    label="🎬 Evidence Player — click any timestamp, marker or screenshot to jump there",
+                                    elem_id="evidence-video", interactive=False, height=340)
+                            with gr.Column(scale=5, min_width=300):
+                                overview_html = gr.HTML()
                         report_html = gr.HTML(value=PLACEHOLDER)
 
                 history_target = gr.Textbox(value="", elem_id="history-target")
@@ -1363,28 +1408,26 @@ def create_app():
                 review_target = gr.Textbox(value="", elem_id="review-target")
                 review_btn = gr.Button("Save review", elem_id="review-btn")
 
-                with gr.Row():
-                    with gr.Column(scale=1, min_width=200):
-                        pdf_out = gr.File(label="📥 Download PDF Report", elem_classes="pdf-btn")
-                    with gr.Column(scale=4):
-                        with gr.Accordion("{ }  Raw JSON Report", open=False):
-                            json_out = gr.Code(language="json")
+                with gr.Accordion("{ }  Raw JSON Report", open=False):
+                    json_out = gr.Code(language="json")
 
                 run_btn.click(
                     fn=investigate,
                     inputs=[video_in, url_in, manual_in, sr_in, mf_in, chunk_in],
-                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out, evidence_video],
+                    outputs=[report_html, overview_html, json_out, pdf_out, status_out, history_out,
+                             evidence_video, results_row],
                 )
                 history_load.click(
                     fn=_load_history_report,
                     inputs=[history_target],
-                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out, evidence_video],
+                    outputs=[report_html, overview_html, json_out, pdf_out, status_out, history_out,
+                             evidence_video, results_row],
                 )
                 # Review clicks don't touch the player, so playback position is kept
                 review_btn.click(
                     fn=review_violation,
                     inputs=[review_target],
-                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out],
+                    outputs=[report_html, overview_html, json_out, pdf_out, status_out, history_out],
                 )
 
             # ── KNOWLEDGE BASE ─────────────────────────────────────────────
@@ -1418,8 +1461,11 @@ def create_app():
             with gr.TabItem("📊  Status", elem_id="tab-status"):
                 with gr.Column(elem_id="status-page"):
                     st_out = gr.HTML()
-                    gr.Button("🔄  Refresh", size="sm", elem_classes="ls-btn-small").click(
-                        fn=get_status, outputs=st_out)
+                    with gr.Row():
+                        gr.Button("🔄  Refresh", size="sm", elem_classes="ls-btn-small").click(
+                            fn=get_status, outputs=st_out)
+                        gr.Button("🔑  Check API keys now", size="sm", elem_classes="ls-btn-small").click(
+                            fn=check_keys_now, outputs=st_out)
                     app.load(fn=get_status, outputs=st_out)
 
             # ── HOW IT WORKS ───────────────────────────────────────────────

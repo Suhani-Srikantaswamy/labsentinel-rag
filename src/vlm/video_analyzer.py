@@ -2,25 +2,32 @@
 Video Analyzer — Stage 2 of LabSentinel-RAG.
 
 Accuracy design:
-  - Structured checklist prompt: forces GPT-4o to check EVERY PPE item and hazard category
-    explicitly, not just describe what it sees generally.
-  - Context window: the previous frame's findings are passed in so the model can notice
-    when a violation STARTS or ENDS (continuity awareness).
-  - Low severity threshold: borderline cases flagged as potential violations rather than missed.
-  - Two-pass synthesis: individual frame findings → cross-frame timeline summary that
-    catches violations spanning multiple frames.
+  - Structured checklist prompt: the vision model checks EVERY PPE item and hazard
+    category explicitly, not just a general description.
+  - Consecutive frames are sent together (batches), so the model sees continuity
+    (gloves removed between frames, a spill appearing) and keeps person IDs consistent.
+  - People are tracked across the whole video: later batches are told who was already
+    seen, and a final reconciliation step merges IDs across parallel batches.
+
+Speed design:
+  - Several frames per request (LABSENTINEL_FRAMES_PER_REQUEST, default 6).
+  - Batches run in parallel across usable API keys (LABSENTINEL_PARALLEL_REQUESTS).
+  - If a batch reply is incomplete, the missing frames fall back to one-frame requests.
 """
 
 from __future__ import annotations
+import os
 import re
+import statistics
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from loguru import logger
 
 from config.settings import settings
 from src.utils.models import DetectedEvent, VideoAnalysisResult, PersonObservation
 from src.utils.json_utils import parse_llm_json
-from src.utils.llm_client import get_client, FatalLLMError
+from src.utils.llm_client import get_client, parallel_lanes, FatalLLMError
 from src.utils.time_utils import format_human_time
 from .video_chunker import extract_frames_chunked, get_video_info
 
@@ -103,19 +110,22 @@ PEOPLE TRACKING:
   (same clothing, hair, build, position), REUSE that person_id. Otherwise give the next
   new id (P1, P2, P3 …). Never reuse an id for a clearly different person.
 - "appearance" = short visual identifier only (clothing colours, hair, accessories, where
-  they stand). Do not guess names, gender or identity.
-- "issues" = this person's problems, using ONLY these keys:
+  they stand). Do not guess names, gender, age or identity — never use words like man,
+  woman, boy, girl, he or she; say "person" instead.
+- "issues" = this person's problems. Use these keys where one fits:
   {issue_keys}
+  If none fits, write a short new snake_case key (e.g. "missing_hard_hat"). Use the SAME
+  key every time for the same kind of problem.
 - Hazards not tied to a person (spill, blocked exit, unlabelled bottle …) go in "scene_issues"
   using the same keys.
 
 Respond ONLY with valid JSON — no prose, no markdown:
 {{
   "lab_type": "<chemistry|biology|physics|engineering|computer_science|medical|general>",
-  "description": "<1-2 sentence factual description>",
+  "description": "<one factual sentence>",
   "people_count": <number>,
-  "objects_involved": ["<every item visible>"],
-  "actions_observed": ["<every action>"],
+  "objects_involved": ["<up to 8 safety-relevant items>"],
+  "actions_observed": ["<up to 4 actions>"],
   "ppe_status": {{
     "lab_coat": "<worn|missing|not_required|cannot_determine>",
     "gloves": "<worn|missing|not_required|cannot_determine>",
@@ -126,13 +136,53 @@ Respond ONLY with valid JSON — no prose, no markdown:
     {{"person_id": "<P1|P2|…>", "appearance": "<short visual identifier>", "issues": ["<issue key>"]}}
   ],
   "scene_issues": ["<issue key>"],
-  "checklist_findings": ["<every issue found, with specific detail>"],
+  "checklist_findings": ["<one short line per issue found; [] if none>"],
   "potential_violation": <true|false>,
-  "violation_hint": "<describe every issue found>",
+  "violation_hint": "<one short line summarising the issues, or \"\" if none>",
   "severity": "<none|low|medium|high|critical>",
   "confidence": <0.0-1.0>
 }}
 """
+
+# ── Batch prompt: same checklist, several consecutive frames per request ──────
+_RESPOND = "Respond ONLY with valid JSON — no prose, no markdown:\n"
+_CHECK_START = FRAME_PROMPT.index("━━━━", FRAME_PROMPT.index("Analyse this frame"))
+_CHECKLIST = FRAME_PROMPT[_CHECK_START:FRAME_PROMPT.index(_RESPOND)]
+_FRAME_SCHEMA = FRAME_PROMPT[FRAME_PROMPT.index(_RESPOND) + len(_RESPOND):].strip()
+assert _FRAME_SCHEMA.startswith("{{")
+
+BATCH_PROMPT = (
+    "You are a trained laboratory safety auditor reviewing CCTV footage.\n\n"
+    "{manual_context}\n\n"
+    "You are given {n} consecutive frames from the same video, in time order:\n"
+    "{image_list}\n"
+    "(Image 1 is the first attached image, Image 2 the second, and so on.)\n\n"
+    "KNOWN PEOPLE (seen in earlier parts of the video): {known_people}\n\n"
+    "Analyse EACH image separately with the checklist below. Use the sequence for continuity\n"
+    "(e.g. gloves removed between images) and keep each person's ID the same across these images.\n"
+    "Be thorough in checking but concise in writing: short phrases, no repetition.\n\n"
+    + _CHECKLIST
+    + "Respond ONLY with valid JSON — no prose, no markdown. Return exactly one entry per image, in order:\n"
+    + "{{\n  \"frames\": [\n"
+    + _FRAME_SCHEMA.replace("{{", "{{\n  \"image\": <image number, 1-based>,", 1)
+    + "\n  ]\n}}\n"
+)
+
+RECONCILE_PROMPT = """\
+People were detected in different parts of ONE CCTV video. The same person may have been
+given different IDs in different parts. Group the IDs that refer to the SAME individual,
+judging by clothing, hair, accessories, build and position.
+
+IDs that appear together in the same frame are DIFFERENT people: {cooccur}
+
+PEOPLE:
+{people}
+
+Respond ONLY with JSON — every ID exactly once:
+{{"groups": [["<id>", "<id>"], ["<id>"]]}}
+"""
+
+FRAMES_PER_REQUEST = max(1, int(os.getenv("LABSENTINEL_FRAMES_PER_REQUEST", "6")))
 
 # ── Timeline synthesis prompt ─────────────────────────────────────────────────
 # Cross-frame analysis: catches violations that span multiple frames and
@@ -237,13 +287,21 @@ For ALL labs regardless of type:
 
 
 class VideoAnalyzer:
-    """GPT-4o Vision video analysis with structured checklist prompts."""
+    """Vision-model video analysis: batched, parallel, with people tracking."""
 
     def __init__(self):
         self.client = get_client()
         from config.settings import settings
         self.model  = settings.llm.active_provider()
+        self._lane_clients = {0: self.client}
+        self._failed_frames = 0
+        self._known_people: dict[str, str] = {}
         logger.info(f"VideoAnalyzer ready — provider: {self.model}")
+
+    def _client_for(self, lane: int):
+        if lane not in self._lane_clients:
+            self._lane_clients[lane] = get_client(lane=lane)
+        return self._lane_clients[lane]
 
     def analyse_video(
         self,
@@ -255,7 +313,7 @@ class VideoAnalyzer:
         on_progress=None,
     ) -> VideoAnalysisResult:
         """
-        Full video analysis pipeline with accuracy-first design.
+        Full video analysis.
 
         manual_text: Full extracted text of the uploaded lab manual.
                      Empty = universal safety rules used as fallback.
@@ -275,43 +333,66 @@ class VideoAnalyzer:
             sample_rate        = sample_rate,
             max_frames         = max_frames,
             chunk_duration_sec = chunk_duration_sec,
-            on_progress        = (lambda p, m: on_progress(0.03 + p * 0.27, m))
+            on_progress        = (lambda p, m: on_progress(0.03 + p * 0.17, m))
                                   if on_progress else None,
         )
 
-        logger.info(f"Analysing {len(frames)} frames …")
+        batches = [frames[i:i + FRAMES_PER_REQUEST] for i in range(0, len(frames), FRAMES_PER_REQUEST)]
+        lanes = max(1, min(parallel_lanes(), len(batches) or 1))
+        logger.info(f"Analysing {len(frames)} frames in {len(batches)} request(s), {lanes} in parallel")
         if on_progress:
-            on_progress(0.30, f"Analysing {len(frames)} frames with {self.model} …")
+            on_progress(0.20, f"Analysing {len(frames)} frames — {len(batches)} request(s), "
+                              f"{lanes} at a time …")
 
-        events: list[DetectedEvent] = []
-        prev_event: DetectedEvent | None = None
         self._failed_frames = 0
-        self._known_people: dict[str, str] = {}     # person_id → latest appearance
+        known: dict[str, str] = {}          # person_id → latest appearance (from earlier waves)
+        results: dict[int, list] = {}
+        done = 0
 
-        for i, frame in enumerate(frames):
-            event = self._analyse_frame(frame, manual_ctx, prev_event)
-            if event:
-                events.append(event)
-                prev_event = event
-                for person in event.people:
-                    if _trackable(person.person_id) and person.appearance:
-                        self._known_people.pop(person.person_id, None)
-                        self._known_people[person.person_id] = person.appearance
-                while len(self._known_people) > _MAX_KNOWN_PEOPLE:
-                    self._known_people.pop(next(iter(self._known_people)))
-            if on_progress and frames:
-                pct = 0.30 + (i + 1) / len(frames) * 0.55
-                on_progress(pct,
-                    f"Frame {i+1}/{len(frames)} @ {frame['timestamp_sec']:.1f}s"
-                    + (" — ⚠ violation flagged" if event and event.potential_violation else ""))
+        for wave_start in range(0, len(batches), lanes):
+            wave = list(range(wave_start, min(wave_start + lanes, len(batches))))
+            snapshot = dict(known)
+            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                futures = {
+                    pool.submit(self._analyse_batch, self._client_for(slot), batches[bi],
+                                manual_ctx, snapshot, 1000 * (bi + 1)): bi
+                    for slot, bi in enumerate(wave)
+                }
+                for fut in as_completed(futures):
+                    bi = futures[fut]
+                    evs, n_failed = fut.result()        # FatalLLMError propagates and aborts the run
+                    results[bi] = evs
+                    self._failed_frames += n_failed
+                    done += len(batches[bi])
+                    if on_progress:
+                        flagged = sum(1 for e in evs if e and e.potential_violation)
+                        on_progress(0.20 + done / max(len(frames), 1) * 0.70,
+                                    f"Analysed {done}/{len(frames)} frames"
+                                    + (f" — ⚠ {flagged} flagged in "
+                                       f"{format_human_time(batches[bi][0]['timestamp_sec'])}–"
+                                       f"{format_human_time(batches[bi][-1]['timestamp_sec'])}" if flagged else ""))
+            # People seen in this wave become KNOWN PEOPLE for the next wave
+            for bi in wave:
+                for ev in results.get(bi, []):
+                    for person in (ev.people if ev else []):
+                        if _trackable(person.person_id) and person.appearance:
+                            known.pop(person.person_id, None)
+                            known[person.person_id] = person.appearance
+            while len(known) > _MAX_KNOWN_PEOPLE:
+                known.pop(next(iter(known)))
 
-        events = _collapse_adjacent_events(events)
+        events = [ev for bi in sorted(results) for ev in results[bi] if ev]
+        if on_progress:
+            on_progress(0.92, "Matching people across the video …")
+        events = self._reconcile_people(events, multi_batch=len(batches) > 1)
+
+        # Merge window follows the real frame spacing (not a fixed number of seconds)
+        ts = sorted(f["timestamp_sec"] for f in frames)
+        spacing = statistics.median([b - a for a, b in zip(ts, ts[1:]) if b > a] or [6.0])
+        events = _collapse_adjacent_events(events, max_gap=max(8.0, 1.6 * spacing))
         events, repeats_merged = _merge_repeat_sightings(events)
         if repeats_merged:
             logger.info(f"Merged {repeats_merged} repeat sighting(s) of already-flagged person/issue pairs")
-
-        if on_progress:
-            on_progress(0.87, "Cross-frame timeline analysis …")
 
         summary = self._synthesise_timeline(events, duration)
 
@@ -346,13 +427,156 @@ class VideoAnalyzer:
 
     # ── Private ───────────────────────────────────────────────────────────────
 
+    def _analyse_batch(self, client, frames: list[dict], manual_ctx: str,
+                       known: dict[str, str], temp_base: int):
+        """
+        Analyse consecutive frames in ONE request. Returns (events, n_failed).
+        Frames missing from the reply are retried one by one. New person IDs are
+        namespaced per batch (P1001…) and renumbered after reconciliation.
+        """
+        entries = None
+        if len(frames) > 1:
+            image_list = "\n".join(f"  Image {i + 1} → t={f['timestamp_sec']:.2f}s "
+                                   f"({format_human_time(f['timestamp_sec'])})"
+                                   for i, f in enumerate(frames))
+            prompt = BATCH_PROMPT.format(
+                manual_context = manual_ctx,
+                n              = len(frames),
+                image_list     = image_list,
+                known_people   = _known_txt(known),
+                issue_keys     = ", ".join(ISSUE_KEYS),
+            )
+            try:
+                resp = client.chat(prompt=prompt, images=[f["base64"] for f in frames],
+                                   temperature=0.05, max_tokens=450 * len(frames))
+                data = parse_llm_json(resp.text)
+                entries = data.get("frames") if isinstance(data, dict) else None
+                if not isinstance(entries, list):
+                    logger.warning(f"Batch reply unparseable ({len(frames)} frames from "
+                                   f"{frames[0]['timestamp_sec']:.0f}s) — retrying frames one by one")
+                    entries = None
+            except FatalLLMError:
+                raise
+            except Exception as e:
+                logger.warning(f"Batch request failed ({e}) — retrying frames one by one")
+
+        by_index = {}
+        for pos, entry in enumerate(entries or []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                idx = int(entry.get("image", pos + 1)) - 1
+            except (TypeError, ValueError):
+                idx = pos
+            if 0 <= idx < len(frames) and idx not in by_index:
+                by_index[idx] = entry
+
+        out, failed, id_map = [], 0, {}
+        prev_event = None
+        for i, frame in enumerate(frames):
+            if i in by_index:
+                try:
+                    ev = _frame_data_to_event(frame, by_index[i], known)
+                except Exception as e:
+                    logger.warning(f"Could not read result for frame @ {frame['timestamp_sec']}s: {e}")
+                    ev = None
+            else:
+                ev = self._analyse_frame_with(client, frame, manual_ctx, prev_event, known)
+            if ev is None:
+                failed += 1
+            else:
+                for person in ev.people:
+                    if _trackable(person.person_id) and person.person_id not in known:
+                        person.person_id = id_map.setdefault(person.person_id, f"P{temp_base + len(id_map) + 1}")
+                prev_event = ev
+            out.append(ev)
+        return out, failed
+
+    def _reconcile_people(self, events: list[DetectedEvent], multi_batch: bool) -> list[DetectedEvent]:
+        """Give every individual ONE id for the whole video (P1, P2 … by first appearance)."""
+        info: dict[str, dict] = {}
+        cooccur: set[frozenset] = set()
+        for ev in sorted(events, key=lambda e: e.timestamp_sec):
+            pids = [p.person_id for p in ev.people if _trackable(p.person_id)]
+            for p in ev.people:
+                if not _trackable(p.person_id):
+                    continue
+                d = info.setdefault(p.person_id, {"first": ev.timestamp_sec, "app": ""})
+                if len(p.appearance) > len(d["app"]):
+                    d["app"] = p.appearance
+            for a in pids:
+                for b in pids:
+                    if a < b:
+                        cooccur.add(frozenset((a, b)))
+        ids = sorted(info, key=lambda k: info[k]["first"])
+        if not ids:
+            return events
+
+        groups = None
+        if multi_batch and len(ids) > 1:
+            groups = self._llm_group_people(ids, info, cooccur)
+        if groups is None:
+            groups = _heuristic_group_people(ids, info, cooccur) if multi_batch else [[i] for i in ids]
+
+        # Never merge two IDs seen in the same frame; every id exactly once
+        clean, seen = [], set()
+        for g in groups:
+            bucket: list[str] = []
+            for pid in g:
+                if pid in info and pid not in seen and not any(frozenset((pid, o)) in cooccur for o in bucket):
+                    bucket.append(pid); seen.add(pid)
+                elif pid in info and pid not in seen:
+                    clean.append([pid]); seen.add(pid)
+            if bucket:
+                clean.append(bucket)
+        clean += [[pid] for pid in ids if pid not in seen]
+        clean.sort(key=lambda g: min(info[p]["first"] for p in g))
+        mapping = {pid: f"P{n}" for n, g in enumerate(clean, 1) for pid in g}
+        if len(mapping) != len(set(mapping.values())):
+            logger.info(f"People reconciled: {len(ids)} IDs → {len(clean)} individual(s)")
+
+        for ev in events:
+            renamed = []
+            for p in ev.people:
+                q = p.model_copy(deep=True)
+                q.person_id = mapping.get(p.person_id, p.person_id)
+                renamed.append(q)
+            ev.people = _union_people([], renamed)
+        return events
+
+    def _llm_group_people(self, ids, info, cooccur):
+        """One short text request that groups IDs which are the same person."""
+        people = "\n".join(f"- {pid} (first seen {format_human_time(info[pid]['first'])}): "
+                           f"{info[pid]['app'] or 'no description'}" for pid in ids)
+        co = ", ".join("/".join(sorted(p)) for p in sorted(cooccur, key=sorted)) or "none"
+        try:
+            resp = self.client.chat(prompt=RECONCILE_PROMPT.format(people=people, cooccur=co),
+                                    temperature=0.0, max_tokens=300 + 20 * len(ids))
+            data = parse_llm_json(resp.text)
+            groups = data.get("groups") if isinstance(data, dict) else None
+            if isinstance(groups, list) and all(isinstance(g, list) for g in groups):
+                return [[str(x).strip().upper() for x in g] for g in groups]
+        except FatalLLMError:
+            pass
+        except Exception as e:
+            logger.warning(f"People reconciliation request failed ({e}) — using appearance matching")
+        return None
+
     def _analyse_frame(
         self,
         frame: dict,
         manual_ctx: str,
         prev_event: DetectedEvent | None,
     ) -> DetectedEvent | None:
-        # Build previous-frame context so model can detect continuity
+        ev = self._analyse_frame_with(self.client, frame, manual_ctx, prev_event,
+                                      getattr(self, "_known_people", {}) or {})
+        if ev is None:
+            self._failed_frames += 1
+        return ev
+
+    def _analyse_frame_with(self, client, frame: dict, manual_ctx: str,
+                            prev_event: DetectedEvent | None, known: dict[str, str]) -> DetectedEvent | None:
+        """One-frame request (used for single images and as the batch fallback)."""
         if prev_event:
             prev_ctx = (
                 f"Violation flag={prev_event.potential_violation}, "
@@ -364,108 +588,31 @@ class VideoAnalyzer:
             prev_ctx = "First frame — no previous context."
             prev_ts  = 0.0
 
-        known = getattr(self, "_known_people", {}) or {}
-        known_txt = "; ".join(f"{pid}: {app[:90]}" for pid, app in known.items()) or "none yet"
         prompt = FRAME_PROMPT.format(
             manual_context = manual_ctx,
             prev_ts        = prev_ts,
             prev_context   = prev_ctx,
-            known_people   = known_txt,
+            known_people   = _known_txt(known),
             issue_keys     = ", ".join(ISSUE_KEYS),
             timestamp      = frame["timestamp_sec"],
         )
-
         try:
-            resp = self.client.chat(
-                prompt      = prompt,
-                images      = [frame["base64"]],
-                temperature = 0.05,
-                max_tokens  = 900,
-            )
+            resp = client.chat(prompt=prompt, images=[frame["base64"]], temperature=0.05, max_tokens=900)
             data = parse_llm_json(resp.text)
             if not data:
-                self._failed_frames += 1
                 logger.warning(f"Unparseable VLM reply @ {frame['timestamp_sec']}s — frame skipped")
                 return None
-
-            data = _sanitize_frame_result(data)
-
-            # Combine checklist findings into the objects list for downstream retrieval
-            lab_type   = data.get("lab_type", "general")
-            objects    = data.get("objects_involved", [])
-            chk        = data.get("checklist_findings", [])
-            ppe_status = data.get("ppe_status", {})
-
-            severity = str(data.get("severity", "none")).lower()
-            is_violation = bool(data.get("potential_violation", False))
-            missing_ppe = [k for k, v in ppe_status.items() if str(v).lower() == "missing"]
-
-            # Only escalate severity for frames that are actually flagged
-            if is_violation and missing_ppe and severity in ("none", "low"):
-                severity = "medium"
-            if is_violation and "lab_coat" in missing_ppe and len(missing_ppe) >= 2:
-                severity = "high"
-            if is_violation and severity == "none":
-                severity = "low"
-
-            people, scene_issues = _parse_people(data, missing_ppe, known)
-
-            return DetectedEvent(
-                event_id            = str(uuid.uuid4()),
-                timestamp_sec       = frame["timestamp_sec"],
-                frame_index         = frame["frame_index"],
-                description         = f"[{lab_type.upper()} LAB] {data.get('description', '')}",
-                objects_involved    = [str(o) for o in objects] + [str(c) for c in chk] + [f"lab_type:{lab_type}"],
-                actions_observed    = [str(a) for a in data.get("actions_observed", []) or []],
-                potential_violation = is_violation,
-                severity            = severity,
-                confidence          = max(0.0, min(1.0, float(data.get("confidence", 0.5) or 0.0))),
-                frame_path          = frame["frame_path"],
-                people              = people,
-                scene_issues        = scene_issues if is_violation else [],
-            )
+            return _frame_data_to_event(frame, data, known)
         except FatalLLMError:
             raise   # all keys exhausted / project blocked — abort the run, don't fake a clean report
         except Exception as e:
-            self._failed_frames += 1
             logger.warning(f"Frame analysis failed @ {frame['timestamp_sec']}s: {e}")
             return None
 
     def _synthesise_timeline(self, events: list[DetectedEvent], duration: float) -> str:
+        """Plain summary built locally — the report's executive summary (one LLM call) replaces it."""
         if not events:
             return "No significant events detected."
-
-        obs = "\n".join(
-            f"[{format_human_time(e.timestamp_sec)}] {e.description} "
-            f"(violation={e.potential_violation}, severity={e.severity})"
-            for e in events
-        )
-
-        # Keep observations concise to avoid token limit issues
-        if len(obs) > 4000:
-            obs = obs[:4000] + "\n[...additional events truncated...]"
-
-        prompt = TIMELINE_PROMPT.format(
-            frame_count  = len(events),
-            duration     = f"{duration:.0f}",
-            observations = obs,
-        )
-        for attempt in range(2):
-            try:
-                resp = self.client.chat(
-                    prompt      = prompt,
-                    temperature = 0.1,
-                    max_tokens  = 500,
-                )
-                data = parse_llm_json(resp.text)
-                summary = data.get("incident_summary", "")
-                if summary:
-                    return summary
-            except FatalLLMError:
-                break
-            except Exception as e:
-                logger.warning(f"Timeline synthesis attempt {attempt+1} failed: {e}")
-
         # Fallback: build summary from events without LLM
         violations = [e for e in events if e.potential_violation]
         if violations:
@@ -659,7 +806,82 @@ def _collapse_adjacent_events(events: list[DetectedEvent], max_gap: float = 8.0)
     return collapsed
 
 
-_PID_RE = re.compile(r"^P\d{1,3}$")
+_PID_RE = re.compile(r"^P\d{1,5}$")
+
+
+def _known_txt(known: dict[str, str]) -> str:
+    return "; ".join(f"{pid}: {app[:90]}" for pid, app in known.items()) or "none yet"
+
+
+def _frame_data_to_event(frame: dict, data: dict, known: dict[str, str]) -> DetectedEvent | None:
+    """Turn one frame's JSON result into a DetectedEvent (shared by single and batch paths)."""
+    if not isinstance(data, dict) or not data:
+        return None
+    data = _sanitize_frame_result(data)
+    lab_type   = str(data.get("lab_type", "general") or "general")
+    objects    = data.get("objects_involved", []) or []
+    chk        = data.get("checklist_findings", []) or []
+    ppe_status = data.get("ppe_status", {}) or {}
+    if not isinstance(ppe_status, dict):
+        ppe_status = {}
+
+    severity = str(data.get("severity", "none")).lower()
+    is_violation = bool(data.get("potential_violation", False))
+    missing_ppe = [k for k, v in ppe_status.items() if str(v).lower() == "missing"]
+
+    # Only escalate severity for frames that are actually flagged
+    if is_violation and missing_ppe and severity in ("none", "low"):
+        severity = "medium"
+    if is_violation and "lab_coat" in missing_ppe and len(missing_ppe) >= 2:
+        severity = "high"
+    if is_violation and severity == "none":
+        severity = "low"
+
+    people, scene_issues = _parse_people(data, missing_ppe, known)
+    try:
+        confidence = float(data.get("confidence", 0.5) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.5
+
+    return DetectedEvent(
+        event_id            = str(uuid.uuid4()),
+        timestamp_sec       = frame["timestamp_sec"],
+        frame_index         = frame["frame_index"],
+        description         = f"[{lab_type.upper()} LAB] {data.get('description', '')}",
+        objects_involved    = [str(o) for o in objects] + [str(c) for c in chk] + [f"lab_type:{lab_type}"],
+        actions_observed    = [str(a) for a in data.get("actions_observed", []) or []],
+        potential_violation = is_violation,
+        severity            = severity,
+        confidence          = max(0.0, min(1.0, confidence)),
+        frame_path          = frame["frame_path"],
+        people              = people,
+        scene_issues        = scene_issues if is_violation else [],
+    )
+
+
+_APPEARANCE_STOP = {"the", "and", "with", "wearing", "person", "worker", "researcher", "near", "standing",
+                    "left", "right", "side", "bench", "lab", "a", "an", "of", "in", "on", "at"}
+
+
+def _heuristic_group_people(ids, info, cooccur) -> list[list[str]]:
+    """Fallback identity matching: appearance-word overlap, never merging people seen together."""
+    toks = {pid: {w for w in re.findall(r"[a-z]+", info[pid]["app"].lower())
+                  if len(w) > 2 and w not in _APPEARANCE_STOP} for pid in ids}
+    groups: list[list[str]] = []
+    for pid in ids:
+        best, best_score = None, 0.0
+        for g in groups:
+            if any(frozenset((pid, o)) in cooccur for o in g):
+                continue
+            rep_t = set().union(*(toks[o] for o in g))
+            score = len(toks[pid] & rep_t) / len(toks[pid] | rep_t) if toks[pid] and rep_t else 0.0
+            if score > best_score:
+                best, best_score = g, score
+        if best is not None and best_score >= 0.5:
+            best.append(pid)
+        else:
+            groups.append([pid])
+    return groups
 
 
 def _trackable(person_id: str) -> bool:
@@ -672,24 +894,31 @@ def _norm_issue(value) -> str:
         return ""
     if key in ISSUE_KEYS:
         return key
-    # Light mapping for near-misses ("no goggles", "missing_safety_glasses" …)
-    for frag, mapped in (("goggle", "missing_eye_protection"), ("eye", "missing_eye_protection"),
-                         ("glass", "missing_eye_protection"), ("glove", "missing_gloves"),
-                         ("coat", "missing_lab_coat"), ("food", "eating_drinking"),
-                         ("drink", "eating_drinking"), ("eat", "eating_drinking"),
-                         ("phone", "phone_use"), ("spill", "spill"), ("label", "unlabelled_container"),
-                         ("hood", "fume_hood_misuse"), ("sash", "fume_hood_misuse"),
-                         ("exit", "blocked_exit"), ("flame", "fire_hazard"), ("fire", "fire_hazard")):
-        if frag in key:
+    # Map clear synonyms onto the standard keys so the same problem always matches.
+    # PPE synonyms only count when the key says the item is absent ("no_goggles"), so e.g.
+    # "eyewash_station_blocked" is NOT mistaken for missing eye protection.
+    absent = any(w in key for w in ("missing", "no_", "without", "not_wearing", "lack", "absent", "removed"))
+    if absent:
+        for frags, mapped in ((("goggle", "eye_protect", "safety_glass", "eyewear", "face_shield"), "missing_eye_protection"),
+                              (("glove",), "missing_gloves"),
+                              (("lab_coat", "labcoat", "coat", "gown"), "missing_lab_coat")):
+            if any(f in key for f in frags):
+                return mapped
+    for frags, mapped in ((("eating", "drinking", "food", "beverage"), "eating_drinking"),
+                          (("phone",), "phone_use"),
+                          (("spill",), "spill"),
+                          (("unlabel", "no_label", "not_labelled", "not_labeled"), "unlabelled_container"),
+                          (("sash",), "fume_hood_misuse")):
+        if any(f in key for f in frags):
             return mapped
     return key[:40]
 
 
-def _parse_people(data: dict, missing_ppe: list[str], known: dict[str, str]):
+def _parse_people(data: dict, missing_ppe: list[str], known: dict[str, str], next_start: int | None = None):
     """Normalise the model's people / scene_issues output into PersonObservation objects."""
     people: list[PersonObservation] = []
     used = set()
-    next_n = max([int(k[1:]) for k in known if _trackable(k)] + [0]) + 1
+    next_n = next_start or (max([int(k[1:]) for k in known if _trackable(k)] + [0]) + 1)
     raw = data.get("people") or []
     if isinstance(raw, list):
         for item in raw:

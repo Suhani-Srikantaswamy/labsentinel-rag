@@ -48,19 +48,15 @@ def extract_frames_chunked(
     Returns list of dicts: {frame_index, timestamp_sec, frame_path, base64}
     """
     sample_rate        = sample_rate        or settings.video.frame_sample_rate
-    max_frames         = max_frames         or settings.video.max_frames
     motion_threshold   = motion_threshold   or settings.video.motion_threshold
     chunk_sec          = chunk_duration_sec or settings.video.chunk_duration_sec
     video_path         = str(video_path)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
-
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps, total_frames = probe_video(video_path)
     duration_sec = total_frames / fps
-    cap.release()
+    if total_frames <= 0:
+        raise ValueError(f"Could not read any frames from video: {video_path}")
+    max_frames = max_frames or auto_frame_budget(duration_sec)
 
     logger.info(
         f"Video: {Path(video_path).name} | {duration_sec:.0f}s | {fps:.1f} FPS | "
@@ -136,6 +132,41 @@ _MIN_EVENT_GAP_SEC = 2.0
 _ANALYSIS_SIZE = (160, 90)   # motion/scene detection runs on a thumbnail (much faster)
 
 
+def auto_frame_budget(duration_sec: float) -> int:
+    """Frames to analyse when no fixed budget is set: scales with the video's length."""
+    v = settings.video
+    n = round(duration_sec / max(v.auto_frame_spacing_sec, 0.5))
+    return int(max(v.auto_min_frames, min(v.auto_max_frames, n)))
+
+
+def probe_video(video_path: str) -> tuple[float, int]:
+    """
+    (fps, total_frames) that work for any container. Some files (webm/mkv streams,
+    screen recordings) report 0 / bogus frame counts or FPS — fall back to counting.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    if not (0.5 < fps < 1000):
+        fps = 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total <= 0 or total > 10**9:
+        total = 0
+        while cap.grab():
+            total += 1
+        logger.info(f"Frame count not in container metadata — counted {total} frames")
+    cap.release()
+    return fps, total
+
+
+def _fit_size(w: int, h: int) -> tuple[int, int]:
+    """Scale (w, h) down to fit inside the configured box, keeping the aspect ratio."""
+    box_w, box_h = settings.video.resize_width, settings.video.resize_height
+    scale = min(box_w / max(w, 1), box_h / max(h, 1), 1.0)
+    return max(2, int(round(w * scale))), max(2, int(round(h * scale)))
+
+
 def _extract_chunk(
     video_path: str,
     start_sec: float,
@@ -176,6 +207,8 @@ def _extract_chunk(
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     extracted: list[dict] = []
+    # Adaptive motion baseline (running mean / variance of frame-to-frame change)
+    m_mean, m_var, m_n = 0.0, 0.0, 0
     n_uniform  = 0
     n_event    = 0
     last_sampled_fi = -10**9
@@ -194,6 +227,16 @@ def _extract_chunk(
         hist = cv2.calcHist([small], [0], None, [64], [0, 256])
         cv2.normalize(hist, hist)
 
+        motion = float(np.mean(cv2.absdiff(prev_small, small))) if prev_small is not None else 0.0
+        if prev_small is not None:
+            m_n += 1
+            alpha = max(0.02, 1.0 / m_n)
+            delta = motion - m_mean
+            m_mean += alpha * delta
+            m_var = (1 - alpha) * (m_var + alpha * delta * delta)
+        # "Motion" = clearly above THIS video's normal change level (camera noise, lighting flicker)
+        motion_trigger = (m_mean + max(4.0 * m_var ** 0.5, 0.5 * motion_thr)) if m_n >= 10 else motion_thr
+
         sample = False
         # Trigger 1: uniform grid (always includes the chunk's first frame)
         if local_fi % interval == 0 and n_uniform < uniform_budget:
@@ -203,20 +246,17 @@ def _extract_chunk(
         elif (n_event < event_budget and prev_small is not None
               and fi - last_sampled_fi >= min_gap_frames
               and (local_fi % interval) <= interval - min_gap_frames):   # not right before a grid frame
-            motion = float(np.mean(cv2.absdiff(prev_small, small)))
             corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
-            if motion > motion_thr or corr < 0.60:
+            if motion > motion_trigger or corr < 0.60:
                 sample = True
                 n_event += 1
                 logger.debug(f"Event frame @ {fi/fps:.1f}s (motion={motion:.1f}, corr={corr:.2f})")
 
         if sample:
             ts      = round(fi / fps, 2)
-            resized = cv2.resize(
-                frame,
-                (settings.video.resize_width, settings.video.resize_height),
-                interpolation=cv2.INTER_AREA,
-            )
+            fh_, fw_ = frame.shape[:2]
+            tw, th = _fit_size(fw_, fh_)
+            resized = frame if (tw, th) == (fw_, fh_) else cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
             fname      = f"frame_{fi:07d}_{ts:.2f}s.jpg"
             fpath      = str(Path(output_dir) / fname)
             cv2.imwrite(fpath, resized, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -241,9 +281,8 @@ def _extract_chunk(
 
 
 def get_video_info(video_path: str) -> dict:
+    fps, total = probe_video(video_path)
     cap     = cv2.VideoCapture(str(video_path))
-    fps     = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()

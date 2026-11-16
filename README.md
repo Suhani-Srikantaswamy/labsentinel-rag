@@ -175,8 +175,13 @@ LABSENTINEL_REQUEST_TIMEOUT=120     # seconds per API call
 LABSENTINEL_TRANSIENT_RETRIES=4     # retries on 503 / timeouts
 
 # Video analysis
-LABSENTINEL_FRAME_RATE=6          # baseline: 1 frame every N seconds (spread evenly over the video)
-LABSENTINEL_MAX_FRAMES=24         # total frame cap — raise for long videos
+LABSENTINEL_FRAME_RATE=6          # minimum spacing of the evenly spaced frames (s)
+LABSENTINEL_MAX_FRAMES=auto       # auto = 1 frame / 10 s, between 24 and 90 frames
+
+# Speed
+LABSENTINEL_FRAMES_PER_REQUEST=6  # consecutive frames analysed in one request
+LABSENTINEL_EVENTS_PER_REQUEST=5  # flagged moments verified in one request
+LABSENTINEL_PARALLEL_REQUESTS=8   # requests in flight (≈3 per usable key)
 LABSENTINEL_MOTION_THRESHOLD=10.0 # motion sensitivity
 
 # Retrieval

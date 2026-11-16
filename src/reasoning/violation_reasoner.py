@@ -8,7 +8,10 @@ Nothing hardcoded — all rules come from the uploaded manual or universal princ
 """
 
 from __future__ import annotations
+import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from loguru import logger
 
@@ -18,7 +21,7 @@ from src.utils.models import (
     VideoAnalysisResult, InvestigationReport,
 )
 from src.utils.json_utils import parse_llm_json
-from src.utils.llm_client import get_client, FatalLLMError
+from src.utils.llm_client import get_client, parallel_lanes, FatalLLMError
 from src.utils.time_utils import format_human_time
 
 
@@ -81,6 +84,52 @@ Respond ONLY with valid JSON — no prose, no markdown:
 }}
 """
 
+EVENTS_PER_REQUEST = max(1, int(os.getenv("LABSENTINEL_EVENTS_PER_REQUEST", "5")))
+
+BATCH_VIOLATION_PROMPT = """\
+You are a certified laboratory safety investigator.
+
+{manual_context}
+
+Below are {n} flagged moments from ONE incident video. Assess EACH event separately.
+
+{events_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR TASK — for EACH event
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. List every GENUINE safety violation in the event — one entry per distinct rule broken
+   (missing PPE items together = ONE "PPE" entry; a spill is separate; food at the bench is
+   separate). Only include what the evidence directly supports, for that event's lab type.
+2. Ignore anything under that event's ALREADY REPORTED EARLIER — it is already in the report.
+   If nothing new remains for an event, give it an empty "violations" list.
+3. Cite the EXACT rule — from the manual if present, or "Universal [<lab type>]: ..."
+4. Explain what went wrong and the specific danger, and give actionable recommendations.
+5. "issues" = the issue keys each entry covers (prefer: {issue_keys}).
+
+Respond ONLY with valid JSON — no prose, no markdown. One entry per event:
+{{
+  "events": [
+    {{
+      "event": "<E1|E2|…>",
+      "violations": [
+        {{
+          "violation_type": "<PPE | Chemical Handling | Equipment Misuse | Fire Hazard | Biological Safety | Electrical Safety | Ergonomics | Waste Disposal | Emergency | Food/Drink | Other>",
+          "issues": ["<issue key>"],
+          "person_ids": ["<P1 …, empty for scene hazards>"],
+          "rule_violated": "<exact quote from manual, or 'Universal [<lab type>]: ...'>",
+          "explanation": "<2-3 sentences>",
+          "severity": "<low|medium|high|critical>",
+          "immediate_action": "<specific action needed RIGHT NOW>",
+          "recommended_action": "<corrective action for next 24-72 hours>",
+          "preventive_measure": "<systemic change to prevent recurrence>"
+        }}
+      ]
+    }}
+  ]
+}}
+"""
+
 SUMMARY_PROMPT = """\
 You are a laboratory safety director writing an official investigation report.
 
@@ -129,7 +178,103 @@ class ViolationReasoner:
     def __init__(self):
         self.client = get_client()
         self.failed_events = 0
+        self._lock = threading.Lock()
+        self._lane_clients = {0: self.client}
         logger.info("ViolationReasoner ready")
+
+    def _client_for(self, lane: int):
+        if lane not in self._lane_clients:
+            self._lane_clients[lane] = get_client(lane=lane)
+        return self._lane_clients[lane]
+
+    def analyse_events(
+        self,
+        events: list[DetectedEvent],
+        evidence_by_event: dict[str, dict[str, list[RetrievedEvidence]]],
+        manual_text: str = "",
+        on_progress=None,
+    ) -> list[Violation]:
+        """
+        Verify many events quickly: EVENTS_PER_REQUEST events per request, groups in
+        parallel across usable keys. A group that fails falls back to one request per event.
+        Returns violations in time order.
+        """
+        if not events:
+            return []
+        manual_ctx = _build_manual_ctx(manual_text)
+        groups = [events[i:i + EVENTS_PER_REQUEST] for i in range(0, len(events), EVENTS_PER_REQUEST)]
+        lanes = max(1, min(parallel_lanes(), len(groups)))
+        logger.info(f"Reasoning over {len(events)} event(s) in {len(groups)} request(s), {lanes} in parallel")
+        found: dict[str, list[Violation]] = {}
+        done = 0
+        for wave_start in range(0, len(groups), lanes):
+            wave = groups[wave_start:wave_start + lanes]
+            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                futures = {pool.submit(self._analyse_group, self._client_for(slot), g, evidence_by_event,
+                                       manual_text, manual_ctx): g for slot, g in enumerate(wave)}
+                for fut in as_completed(futures):
+                    g = futures[fut]
+                    found.update(fut.result())          # FatalLLMError propagates
+                    done += len(g)
+                    if on_progress:
+                        n_v = sum(len(found.get(e.event_id, [])) for e in g)
+                        on_progress(done / len(events), f"Verified {done}/{len(events)} flagged moments"
+                                                        + (f" — {n_v} violation(s) confirmed" if n_v else ""))
+        out: list[Violation] = []
+        for e in sorted(events, key=lambda e: e.timestamp_sec):
+            out.extend(found.get(e.event_id, []))
+        return out
+
+    def _analyse_group(self, client, group, evidence_by_event, manual_text, manual_ctx) -> dict[str, list[Violation]]:
+        from src.vlm.video_analyzer import ISSUE_KEYS
+        if len(group) == 1:
+            e = group[0]
+            return {e.event_id: self.analyse_event_all(e, evidence_by_event.get(e.event_id, {}), manual_text, client)}
+        blocks = []
+        for i, e in enumerate(group, 1):
+            ev = evidence_by_event.get(e.event_id, {})
+            blocks.append(
+                f"━━ EVENT E{i} ━━\n"
+                f"Lab type   : {_lab_type(e)}\n"
+                f"Timestamp  : {e.timestamp_sec}s ({format_human_time(e.timestamp_sec)})\n"
+                f"Description: {e.description}\n"
+                f"People     : {_fmt_people(e)}\n"
+                f"Objects    : {', '.join(o for o in e.objects_involved if not o.startswith('lab_type:')) or 'N/A'}\n"
+                f"Actions    : {', '.join(e.actions_observed) or 'N/A'}\n"
+                f"AI severity: {e.severity}\n"
+                f"ALREADY REPORTED EARLIER (do NOT report these again): {'; '.join(e.already_reported) or 'nothing'}\n"
+                f"Relevant manual / SOP passages:\n{_fmt(ev.get('sops', []), n=3, chars=500)}\n"
+                f"Equipment notes:\n{_fmt(ev.get('manuals', []), n=2, chars=300)}\n"
+                f"Similar past incidents:\n{_fmt(ev.get('incidents', []), n=2, chars=300)}\n")
+        prompt = BATCH_VIOLATION_PROMPT.format(manual_context=manual_ctx, n=len(group),
+                                               events_block="\n".join(blocks), issue_keys=", ".join(ISSUE_KEYS))
+        try:
+            resp = client.chat(prompt=prompt, temperature=0.15, max_tokens=900 * len(group))
+            data = parse_llm_json(resp.text)
+            entries = data.get("events") if isinstance(data, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError("unparseable batch reasoning reply")
+            by_label = {}
+            for pos, entry in enumerate(entries):
+                if isinstance(entry, dict):
+                    label = str(entry.get("event") or f"E{pos + 1}").strip().upper()
+                    by_label[label] = entry
+            out = {}
+            for i, e in enumerate(group, 1):
+                entry = by_label.get(f"E{i}")
+                if entry is None:       # model skipped this event → verify it on its own
+                    out[e.event_id] = self.analyse_event_all(e, evidence_by_event.get(e.event_id, {}),
+                                                             manual_text, client)
+                    continue
+                items = [x for x in (entry.get("violations") or []) if isinstance(x, dict)]
+                out[e.event_id] = self._items_to_violations(e, evidence_by_event.get(e.event_id, {}), items)
+            return out
+        except FatalLLMError:
+            raise
+        except Exception as ex:
+            logger.warning(f"Batch reasoning failed ({ex}) — verifying {len(group)} event(s) one by one")
+            return {e.event_id: self.analyse_event_all(e, evidence_by_event.get(e.event_id, {}), manual_text, client)
+                    for e in group}
 
     def analyse_event(
         self,
@@ -146,13 +291,15 @@ class ViolationReasoner:
         event: DetectedEvent,
         evidence: dict[str, list[RetrievedEvidence]],
         manual_text: str = "",
+        client=None,
     ) -> list[Violation]:
         """All distinct, NEW violations in one event (one per rule broken)."""
-        from src.vlm.video_analyzer import ISSUE_KEYS, _norm_issue
+        from src.vlm.video_analyzer import ISSUE_KEYS
+        client = client or self.client
         manual_ctx = _build_manual_ctx(manual_text)
         prompt = VIOLATION_PROMPT.format(
             manual_context     = manual_ctx,
-            lab_type           = next((o.split(":")[1] for o in event.objects_involved if o.startswith("lab_type:")), "general"),
+            lab_type           = _lab_type(event),
             timestamp          = event.timestamp_sec,
             description        = event.description,
             people             = _fmt_people(event),
@@ -166,7 +313,7 @@ class ViolationReasoner:
             incident_evidence  = _fmt(evidence.get("incidents", [])),
         )
         try:
-            resp = self.client.chat(
+            resp = client.chat(
                 prompt      = prompt,
                 temperature = 0.15,
                 max_tokens  = 1600,
@@ -182,7 +329,16 @@ class ViolationReasoner:
                 items = [data]
             else:
                 items = []
+            return self._items_to_violations(event, evidence, items)
+        except FatalLLMError:
+            raise
+        except Exception as e:
+            return self._unverified(event, evidence, e)
 
+    def _items_to_violations(self, event, evidence, items) -> list[Violation]:
+        """Model output entries → Violation objects (drops already-reported / duplicate entries)."""
+        from src.vlm.video_analyzer import _norm_issue
+        if True:
             # Issue keys already reported earlier (e.g. "P1: missing gloves" → ("P1","missing_gloves"))
             done = set()
             for entry in event.already_reported:
@@ -223,11 +379,12 @@ class ViolationReasoner:
             if not out:
                 logger.debug(f"No new violation confirmed @ {event.timestamp_sec}s")
             return out
-        except FatalLLMError:
-            raise
-        except Exception as e:
+
+    def _unverified(self, event, evidence, e) -> list[Violation]:
+        if True:
             # Don't silently drop an event the vision model flagged — keep it, marked unverified
-            self.failed_events += 1
+            with self._lock:
+                self.failed_events += 1
             logger.error(f"Reasoning failed @ {event.timestamp_sec}s: {e} — keeping as unverified")
             return [Violation(
                 violation_id       = str(uuid.uuid4()),
@@ -362,12 +519,68 @@ def _derive_risk(violations: list[Violation]) -> str:
     return _norm_severity(max(violations, key=lambda v: _SEVERITY_RANK.get(v.severity, 0)).severity, "medium")
 
 
-def _fmt(items: list[RetrievedEvidence], n: int = 4) -> str:
+_NO_CONSOLIDATE = {"other", "unknown", ""}
+
+
+def consolidate_by_person(violations: list[Violation]) -> tuple[list[Violation], int]:
+    """
+    One violation per person per violation type for the whole video. A later violation
+    of the same type for the same person (e.g. P5: gloves at 03:10, then goggles at 03:40)
+    is folded into the first: its issues are added, the time is recorded under
+    "Also seen at", and severity is the worst of the two.
+    Scene hazards, unverified items and "Other" are left as they are.
+    Returns (violations, number_folded).
+    """
+    out: list[Violation] = []
+    index: dict[tuple[str, str], int] = {}
+    folded = 0
+    for v in sorted(violations, key=lambda x: x.event.timestamp_sec):
+        vtype = v.violation_type.strip().lower()
+        if not v.person_ids or vtype in _NO_CONSOLIDATE or vtype.startswith("unverified"):
+            out.append(v)
+            continue
+        target = next((index[(vtype, p)] for p in v.person_ids if (vtype, p) in index), None)
+        if target is None:
+            out.append(v)
+            for p in v.person_ids:
+                index[(vtype, p)] = len(out) - 1
+            continue
+
+        base = out[target]
+        ts = v.event.timestamp_sec
+        new_issues = [i for i in v.issues if i not in base.issues]
+        base.issues = base.issues + new_issues
+        base.person_ids = base.person_ids + [p for p in v.person_ids if p not in base.person_ids]
+        for p in v.person_ids:
+            index.setdefault((vtype, p), target)
+        if _SEVERITY_RANK.get(v.severity, 0) > _SEVERITY_RANK.get(base.severity, 0):
+            base.severity = v.severity
+        # Record this later sighting so it shows under "Also seen at"
+        base.event = base.event.model_copy(deep=True)
+        for p in v.person_ids:
+            for i in (v.issues or ["other"]):
+                times = base.event.repeat_sightings.setdefault(f"{p}:{i}", [])
+                if ts not in times:
+                    times.append(ts)
+        if ts not in base.event.repeat_timestamps:
+            base.event.repeat_timestamps.append(ts)
+        if new_issues:
+            base.explanation = (base.explanation.rstrip() +
+                                f" Also at {format_human_time(ts)}: {', '.join(i.replace('_', ' ') for i in new_issues)}.")
+        folded += 1
+    return out, folded
+
+
+def _lab_type(event: DetectedEvent) -> str:
+    return next((o.split(":", 1)[1] for o in event.objects_involved if o.startswith("lab_type:")), "general")
+
+
+def _fmt(items: list[RetrievedEvidence], n: int = 4, chars: int = 700) -> str:
     if not items:
         return "  (none retrieved)"
     lines = []
     for i, e in enumerate(items[:n], 1):
-        snippet = e.chunk.content[:700].replace("\n", " ")
+        snippet = e.chunk.content[:chars].replace("\n", " ")
         lines.append(f"  {i}. [{e.chunk.title}] (score={e.score:.2f}) — {snippet}…")
     return "\n".join(lines)
 
