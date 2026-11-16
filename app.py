@@ -292,7 +292,7 @@ def investigate(video_file, video_url, manual_files,
             "Get a FREE Google Gemini key at https://aistudio.google.com/apikey",
             "Add to .env:  GOOGLE_API_KEY=your-key",
             "Restart the app: python app.py",
-        ]), "{}", None, _stat("❌", "No API key"), "", _load_history(5)
+        ]), "{}", None, _stat("❌", "No API key"), "", _load_history(5), None
 
     video_path = None; tmp_dir = None
     if video_url and video_url.strip():
@@ -306,11 +306,11 @@ def investigate(video_file, video_url, manual_files,
                 video_url.strip(),
                 progress_cb=lambda p, m: progress(0.02 + p * 0.10, desc=m))
             if err:
-                return _err("Download Failed", [err, "Try uploading the video directly."]), "{}", None, _stat("❌", "Download failed"), "", _load_history(5)
+                return _err("Download Failed", [err, "Try uploading the video directly."]), "{}", None, _stat("❌", "Download failed"), "", _load_history(5), None
     else:
         video_path = _coerce_file_path(video_file)
         if not video_path:
-            return _err("No Video", ["Upload a video file or paste a URL."]), "{}", None, _stat("⚠️", "No input"), "", _load_history(5)
+            return _err("No Video", ["Upload a video file or paste a URL."]), "{}", None, _stat("⚠️", "No input"), "", _load_history(5), None
 
     progress(0.13, desc="Reading lab manual …")
     manual_text  = _combine_manuals(manual_files) if manual_files else ""
@@ -343,18 +343,18 @@ def investigate(video_file, video_url, manual_files,
                 "This normally means the project does not have Gemini enabled or billing is not active.",
                 "Open https://aistudio.google.com, enable the correct project, turn on billing if needed, and add a valid key to .env.",
                 "Then restart the app and try again.",
-            ]), "{}", None, _stat("❌", "Gemini project blocked"), "", _load_history(5)
+            ]), "{}", None, _stat("❌", "Gemini project blocked"), "", _load_history(5), None
         if "All " in err and "Gemini API key" in err and "exhausted" in err.lower():
             return _err("All API keys are exhausted", [
                 "Every configured Gemini API key has reached its daily quota.",
                 "Add another key in .env (GOOGLE_API_KEY_2=..., GOOGLE_API_KEY_3=...) or wait for the quota to reset.",
                 "You can also reduce Max Frames in Advanced Settings to use fewer requests.",
-            ]), "{}", None, _stat("❌", "All API keys exhausted"), "", _load_history(5)
-        return _err("Investigation Failed", [err]), "{}", None, _stat("❌", err[:80]), "", _load_history(5)
+            ]), "{}", None, _stat("❌", "All API keys exhausted"), "", _load_history(5), None
+        return _err("Investigation Failed", [err]), "{}", None, _stat("❌", err[:80]), "", _load_history(5), None
 
     report = holder.get("report")
     if not report:
-        return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5)
+        return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5), None
 
     video_lab_type = _majority_video_lab_type(report.timeline)
 
@@ -377,23 +377,10 @@ def investigate(video_file, video_url, manual_files,
     report.metadata["manual_label"] = manual_label
 
     progress(0.97, desc="Rendering report …")
-    from src.report.report_generator import ReportGenerator
-    gen  = ReportGenerator()
-    html = gen._render_html(report)
-    js   = json.dumps(report.model_dump(mode="json"), indent=2, default=str)
-    pdf  = None
-    try: pdf = gen.to_pdf(report)
-    except Exception as e: logger.warning(f"PDF failed: {e}")
-
     if tmp_dir: shutil.rmtree(tmp_dir, ignore_errors=True)
+    outputs = _report_outputs(report, "Complete")
     progress(1.0, desc="Done!")
-
-    r = report.overall_risk_level
-    status_html = _stat("✅",
-        f"Complete — <b>{report.total_violations} violation(s)</b> | "
-        f"Risk: <b style='color:{_risk_col(r)}'>{r.upper()}</b> | "
-        f"{len(report.timeline)} events | {report.metadata.get('frames_sampled','?')} frames")
-    return html, js, pdf, status_html, _summary_md(report, manual_label), _load_history(5)
+    return (*outputs, _playable_video(report.video_path))
 
 # ── KB builder ────────────────────────────────────────────────────────────────
 
@@ -402,7 +389,8 @@ def build_kb(sop_f, man_f, inc_f, sop_d, man_d, inc_d, reset, progress=gr.Progre
     try:
         from src.ingestion.document_loader import DocumentLoader
         from src.ingestion.knowledge_base_builder import KnowledgeBaseBuilder
-        import config.settings as cfg
+        import importlib
+        cfg = importlib.import_module("config.settings")   # the module, not the settings object
         loader = DocumentLoader(); builder = KnowledgeBaseBuilder()
         if reset: builder.reset()
         chunks = []
@@ -484,7 +472,45 @@ def get_status():
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _risk_col(r):
-    return {"low":"#16a34a","medium":"#d97706","high":"#ea580c","critical":"#dc2626"}.get(r,"#94a3b8")
+    from src.report.theme import severity_color
+    return severity_color(r)
+
+
+def _playable_video(video_path):
+    """Path for the evidence player, or None if the original video is gone."""
+    return str(video_path) if video_path and Path(str(video_path)).is_file() else None
+
+
+def _report_outputs(report, status_prefix: str):
+    """
+    Save the report (JSON + standalone HTML + PDF, so metadata and review
+    decisions persist) and build the 6 UI outputs:
+    (report_html, json, pdf, status, summary, history).
+    """
+    from src.report.report_generator import ReportGenerator
+    gen = ReportGenerator()
+    try:
+        gen.to_json(report)
+        gen.to_html(report)
+    except Exception as e:
+        logger.warning(f"Saving report failed: {e}")
+    pdf = None
+    try:
+        pdf = gen.to_pdf(report)
+    except Exception as e:
+        logger.warning(f"PDF failed: {e}")
+    html = gen.render_html(report, interactive=True)
+    js = json.dumps(report.model_dump(mode="json"), indent=2, default=str)
+    r = report.overall_risk_level
+    rv = report.review_counts()
+    reviewed = (f" | ✓ {rv['confirmed']} confirmed, ✗ {rv['false_alarm']} false alarm"
+                if rv["confirmed"] or rv["false_alarm"] else "")
+    status_html = _stat("✅",
+        f"{status_prefix} — <b>{report.total_violations} violation(s)</b> | "
+        f"Risk: <b style='color:{_risk_col(r)}'>{_html.escape(r.upper())}</b> | "
+        f"{len(report.timeline)} events | {report.metadata.get('frames_sampled','?')} frames{reviewed}")
+    manual_label = report.metadata.get("manual_label") or "—"
+    return html, js, pdf, status_html, _summary_md(report, manual_label), _load_history(5)
 
 def _stat(icon, msg):
     return (f'<div style="padding:10px 14px;border-radius:8px;'
@@ -501,6 +527,7 @@ def _summary_md(report, manual_label):
              "| | |", "|---|---|",
              f"| **Risk** | **{r.upper()}** |",
              f"| **Violations** | {report.total_violations} |",
+             f"| **Reviewed** | ✓ {report.review_counts()['confirmed']} confirmed · ✗ {report.review_counts()['false_alarm']} false alarm · {report.review_counts()['pending']} pending |",
              f"| **Events** | {len(report.timeline)} |",
              f"| **Frames** | {report.metadata.get('frames_sampled','?')} |",
              f"| **Duration** | {dur} |",
@@ -520,51 +547,71 @@ def _err(title, tips):
             f'<ul style="margin:0;padding-left:18px;line-height:1.8">{items}</ul></div>')
 
 
-def _load_history_report(report_path: str):
-    if not report_path:
-        return PLACEHOLDER, "{}", None, _stat("⚠️", "No history item selected"), "", _load_history(5)
-
+def _resolve_report_path(report_path: str):
+    """Only allow report JSON files inside OUTPUT_DIR."""
     from config.settings import OUTPUT_DIR
+    if not report_path:
+        return None
     path = Path(report_path)
     try:
         path.resolve().relative_to(Path(OUTPUT_DIR).resolve())
     except ValueError:
-        return PLACEHOLDER, "{}", None, _stat("⚠️", "Invalid history item"), "", _load_history(5)
-    if not path.exists():
-        return PLACEHOLDER, "{}", None, _stat("⚠️", "History report not found"), "", _load_history(5)
+        return None
+    return path if path.is_file() and path.suffix == ".json" else None
 
+
+def _load_history_report(report_path: str):
+    if not report_path:
+        return PLACEHOLDER, "{}", None, _stat("⚠️", "No history item selected"), "", _load_history(5), None
+    path = _resolve_report_path(report_path)
+    if path is None:
+        return PLACEHOLDER, "{}", None, _stat("⚠️", "Invalid or missing history item"), "", _load_history(5), None
     try:
-        import json as _json
         from src.utils.models import InvestigationReport
-        from src.report.report_generator import ReportGenerator
-
-        with path.open() as f:
-            data = _json.load(f)
-        report = InvestigationReport.model_validate(data)
-        gen = ReportGenerator()
-        html = gen._render_html(report)
-        js = json.dumps(report.model_dump(mode="json"), indent=2, default=str)
-        pdf = None
-        try:
-            pdf = gen.to_pdf(report)
-        except Exception as e:
-            logger.warning(f"History PDF failed: {e}")
-
-        manual_label = report.metadata.get("manual_label") or "Historical report"
-        return (
-            html,
-            js,
-            pdf,
-            _stat("✅",
-                f"Loaded historical report — <b>{report.total_violations} violation(s)</b> | "
-                f"Risk: <b style='color:{_risk_col(report.overall_risk_level)}'>{report.overall_risk_level.upper()}</b> | "
-                f"{len(report.timeline)} events"),
-            _summary_md(report, manual_label),
-            _load_history(5),
-        )
+        report = InvestigationReport.model_validate(json.loads(path.read_text()))
+        return (*_report_outputs(report, "Loaded historical report"), _playable_video(report.video_path))
     except Exception as e:
         logger.exception(e)
-        return PLACEHOLDER, "{}", None, _stat("❌", f"Could not load report: {e}"), "", _load_history(5)
+        return PLACEHOLDER, "{}", None, _stat("❌", f"Could not load report: {_html.escape(str(e))}"), "", _load_history(5), None
+
+
+_REVIEW_STATES = {"confirmed", "false_alarm", "pending"}
+
+
+def review_violation(payload: str):
+    """
+    Handle a Confirm / False-alarm / Undo click from the report.
+    payload = "report_id|violation_id|status". Updates and re-saves the report.
+    """
+    from datetime import datetime, timezone
+    from src.utils.models import InvestigationReport
+    from src.report.report_generator import report_json_path
+
+    def _keep(msg):
+        return (gr.skip(), gr.skip(), gr.skip(), _stat("⚠️", msg), gr.skip(), gr.skip())
+
+    try:
+        report_id, violation_id, status = str(payload or "").split("|", 2)
+    except ValueError:
+        return _keep("Invalid review action")
+    if status not in _REVIEW_STATES:
+        return _keep("Invalid review status")
+
+    path = _resolve_report_path(str(report_json_path(report_id)))
+    if path is None:
+        return _keep("Report file not found — cannot save review")
+
+    report = InvestigationReport.model_validate(json.loads(path.read_text()))
+    target = next((v for v in report.violations if v.violation_id == violation_id), None)
+    if target is None:
+        return _keep("Violation not found in report")
+
+    target.review_status = status
+    target.reviewed_at = None if status == "pending" else datetime.now(timezone.utc)
+    logger.info(f"Review: report {report_id} violation {violation_id[:8]} → {status}")
+    label = {"confirmed": "Violation confirmed", "false_alarm": "Marked as false alarm",
+             "pending": "Review undone"}[status]
+    return _report_outputs(report, f"{label} — saved")
 
 
 def _load_history(n: int = 5) -> str:
@@ -1007,7 +1054,9 @@ body {
   margin-top: 2px;
 }
 #history-target,
-#history-load-btn {
+#history-load-btn,
+#review-target,
+#review-btn {
   display: none !important;
 }
 
@@ -1193,24 +1242,67 @@ function lsCenter() {
 }
 
 [50, 200, 600, 1500].forEach(function(ms) { setTimeout(lsCenter, ms); });
+
+function lsRoot() {
+  var ga = document.querySelector('gradio-app');
+  return (ga && ga.shadowRoot) ? ga.shadowRoot : document;
+}
+
+// Fill a hidden Gradio textbox and click its hidden button (Python handler runs)
+function lsSend(targetId, buttonId, value) {
+  var root = lsRoot();
+  var target = root.getElementById ? root.getElementById(targetId) : document.getElementById(targetId);
+  var input = target ? target.querySelector('input, textarea') : null;
+  if (!input) return;
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  setTimeout(function () {
+    var btn = root.getElementById ? root.getElementById(buttonId) : document.getElementById(buttonId);
+    if (btn) btn.click();
+  }, 60);
+}
+
+// Click a timestamp / chart marker / screenshot → seek the evidence player
+document.addEventListener('click', function (e) {
+  var el = e.target && e.target.closest ? e.target.closest('[data-seek]') : null;
+  if (!el) return;
+  var t = parseFloat(el.getAttribute('data-seek')) || 0;
+  var root = lsRoot();
+  var wrap = root.getElementById ? root.getElementById('evidence-video') : document.getElementById('evidence-video');
+  var video = wrap ? wrap.querySelector('video') : null;
+  if (!video) {
+    if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  var go = function () { video.currentTime = t; video.play().catch(function () {}); };
+  if (video.readyState >= 1) go(); else video.addEventListener('loadedmetadata', go, { once: true });
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  e.preventDefault();
+}, true);
+
+// Keyboard support for the report's role="button" controls
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var el = e.target && e.target.closest ? e.target.closest('[data-seek],[data-review]') : null;
+  if (el) { e.preventDefault(); el.click(); }
+}, true);
+
+// Review buttons inside the report
+document.addEventListener('click', function (e) {
+  var el = e.target && e.target.closest ? e.target.closest('[data-review]') : null;
+  if (!el) return;
+  e.preventDefault();
+  el.disabled = true;
+  el.textContent = 'Saving…';
+  lsSend('review-target', 'review-btn', el.getAttribute('data-review'));
+}, true);
 document.addEventListener('click', function(e) {
   const card = e.target && e.target.closest ? e.target.closest('[data-history-id]') : null;
   if (card) {
     const reportPath = card.getAttribute('data-history-id');
-    if (reportPath) {
-      const appRoot = document.querySelector('gradio-app')?.shadowRoot || document;
-      const target = appRoot.getElementById ? appRoot.getElementById('history-target') : null;
-      const input = target ? target.querySelector('input, textarea') : null;
-      if (input) {
-        input.value = reportPath;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      const btn = appRoot.getElementById ? appRoot.getElementById('history-load-btn') : null;
-      if (btn) {
-        btn.click();
-      }
-    }
+    // lsSend waits for Gradio to register the value before clicking (fixes history cards not loading)
+    if (reportPath) lsSend('history-target', 'history-load-btn', reportPath);
   }
   if (e.target && e.target.getAttribute('role') === 'tab') {
     setTimeout(lsCenter, 100);
@@ -1261,10 +1353,15 @@ def create_app():
 
                     with gr.Column(scale=7, min_width=500, elem_classes="ls-right"):
                         summary_out = gr.Markdown()
+                        evidence_video = gr.Video(
+                            label="🎬 Evidence Player — click any timestamp, marker or screenshot in the report to jump there",
+                            elem_id="evidence-video", interactive=False, height=320)
                         report_html = gr.HTML(value=PLACEHOLDER)
 
                 history_target = gr.Textbox(value="", elem_id="history-target")
                 history_load = gr.Button("Load history", elem_id="history-load-btn")
+                review_target = gr.Textbox(value="", elem_id="review-target")
+                review_btn = gr.Button("Save review", elem_id="review-btn")
 
                 with gr.Row():
                     with gr.Column(scale=1, min_width=200):
@@ -1276,11 +1373,17 @@ def create_app():
                 run_btn.click(
                     fn=investigate,
                     inputs=[video_in, url_in, manual_in, sr_in, mf_in, chunk_in],
-                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out],
+                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out, evidence_video],
                 )
                 history_load.click(
                     fn=_load_history_report,
                     inputs=[history_target],
+                    outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out, evidence_video],
+                )
+                # Review clicks don't touch the player, so playback position is kept
+                review_btn.click(
+                    fn=review_violation,
+                    inputs=[review_target],
                     outputs=[report_html, json_out, pdf_out, status_out, summary_out, history_out],
                 )
 
@@ -1366,12 +1469,14 @@ def launch(port: int | str | None = None, share: bool | None = None):
     port  = _resolve_gradio_port(port if port is not None else os.getenv("GRADIO_PORT", "7860"))
     if share is None:
         share = os.getenv("GRADIO_SHARE", "false").lower() == "true"
+    from config.settings import VIDEO_DIR, OUTPUT_DIR
     app   = create_app()
     app.launch(
         server_name   = "0.0.0.0",
         server_port   = port,
         share         = share,
         max_file_size = None,
+        allowed_paths = [str(VIDEO_DIR), str(OUTPUT_DIR)],
         show_error    = True,
         css           = CSS,
         js            = THEME_JS,

@@ -526,3 +526,14 @@ class TestDeterministicChunkIds:
         a = DocumentLoader(chunk_size=30, chunk_overlap=5).load_file(f, "sop")
         b = DocumentLoader(chunk_size=30, chunk_overlap=5).load_file(f, "sop")
         assert [c.chunk_id for c in a] == [c.chunk_id for c in b]
+
+
+class TestLoadAllDirectories:
+    def test_load_all_defaults_and_overrides(self, tmp_path):
+        """Regression: `import config.settings as cfg` returned the settings object, breaking load_all."""
+        from src.ingestion.document_loader import DocumentLoader
+        (tmp_path / "s").mkdir(); (tmp_path / "s" / "a.txt").write_text("Wear goggles. " * 30)
+        empty = tmp_path / "empty"; empty.mkdir()
+        chunks = DocumentLoader().load_all(sop_dir=tmp_path / "s", manual_dir=empty, incident_dir=empty)
+        assert chunks and all(c.source_type == "sop" for c in chunks)
+        DocumentLoader().load_all()   # defaults must not raise

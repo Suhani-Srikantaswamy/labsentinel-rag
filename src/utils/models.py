@@ -72,6 +72,9 @@ class Violation(BaseModel):
     recommended_action: str = ""
     immediate_action: str = ""
     preventive_measure: str = ""
+    # Human review — set from the web UI ("Confirm" / "False alarm" buttons)
+    review_status: str = Field(default="pending", description="pending | confirmed | false_alarm")
+    reviewed_at: Optional[datetime] = None
 
 
 # ── Final Report Model ────────────────────────────────────────────────────────
@@ -92,3 +95,9 @@ class InvestigationReport(BaseModel):
 
     def model_post_init(self, __context):
         self.total_violations = len(self.violations)
+
+    def review_counts(self) -> dict[str, int]:
+        counts = {"pending": 0, "confirmed": 0, "false_alarm": 0}
+        for v in self.violations:
+            counts[v.review_status if v.review_status in counts else "pending"] += 1
+        return counts

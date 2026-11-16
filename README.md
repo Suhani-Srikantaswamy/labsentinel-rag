@@ -31,6 +31,10 @@ LabSentinel-RAG investigates lab safety incidents automatically using a 5-stage 
 - **Any video length** — processes hours of CCTV footage in chunks automatically
 - **Multi-key rotation** — supports multiple Gemini API keys, rotates when one hits quota
 - **Fully free** — runs on Google Gemini free tier (no credit card needed)
+- **Evidence screenshots** — every violation shows the exact video frame (HTML + PDF)
+- **Click-to-play timestamps** — click any timestamp, chart marker or screenshot to jump the evidence player to that moment
+- **Violation timeline chart** — severity-coloured markers across the whole video
+- **Human review** — ✓ Confirm / ✗ False alarm on each violation, saved into the report
 
 ---
 
@@ -86,6 +90,15 @@ Open **http://localhost:7860** (or run `python main.py demo`)
 python main.py investigate path/to/video.mp4 --manual path/to/lab_manual.pdf
 ```
 
+### Or run with Docker
+
+```bash
+cp .env.example .env        # add your GOOGLE_API_KEY
+docker compose up --build   # → http://localhost:7860
+```
+
+`data/` and `outputs/` are mounted as volumes, and API keys come from `.env` at runtime (they are never baked into the image).
+
 ---
 
 ## How to Use the Web UI
@@ -93,7 +106,10 @@ python main.py investigate path/to/video.mp4 --manual path/to/lab_manual.pdf
 1. **Upload your lab manual** — PDF, DOCX, or TXT (any lab's safety manual)
 2. **Upload a video** or paste a YouTube URL
 3. Click **🚀 Run Investigation**
-4. View the full report inline — download PDF with one click
+4. Review the report inline:
+   - Click a **timestamp**, **timeline marker** or **screenshot** → the Evidence Player jumps to that moment
+   - Mark each violation **✓ Confirm** or **✗ False alarm** (↺ Undo to reset) — saved to the report JSON, HTML and PDF
+5. Download the PDF with one click. The standalone HTML report in `outputs/` has its own video player when opened locally.
 
 ---
 
@@ -133,7 +149,7 @@ labsentinel-rag/
 │   ├── ingestion/          # Document loading + ChromaDB indexing
 │   ├── retrieval/          # RAG retrieval from knowledge base
 │   ├── reasoning/          # LLM violation analysis + report generation
-│   ├── report/             # HTML + PDF + JSON report rendering
+│   ├── report/             # JSON + PDF rendering; HTML via templates/report.html.j2
 │   └── utils/              # Models, logging, LLM client (key rotation)
 ├── data/
 │   ├── sops/               # Your lab SOPs (add your own here)
@@ -188,6 +204,8 @@ LABSENTINEL_OUTPUT_FORMATS=json,html,pdf
 ```bash
 pytest tests/ -v
 ```
+
+`tests/test_e2e.py` runs the whole pipeline (frame sampling → retrieval → reasoning → reports → review) on a generated video with a fake LLM, so it uses no API quota.
 
 ---
 

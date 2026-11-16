@@ -1,0 +1,13 @@
+# docker compose up --build   →   http://localhost:7860
+services:
+  labsentinel:
+    build: .
+    image: labsentinel-rag:latest
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env                      # your API keys (never baked into the image)
+    volumes:
+      - ./data:/app/data          # SOPs, manuals, incidents, cached videos, vector store
+      - ./outputs:/app/outputs    # reports, extracted frames, logs
+    restart: unless-stopped

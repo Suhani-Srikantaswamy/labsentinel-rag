@@ -2,34 +2,61 @@
 Report Generator — Stage 5 of LabSentinel-RAG pipeline.
 
 Generates the final investigation report in three formats:
-  1. JSON  — machine-readable, full fidelity
-  2. HTML  — human-readable, evidence-linked
-  3. PDF   — printable formal report (via reportlab)
+  1. JSON  — machine-readable, full fidelity (includes reviewer decisions)
+  2. HTML  — rendered from templates/report.html.j2 (Jinja2, auto-escaped):
+             evidence screenshots, clickable timestamps, violation timeline chart,
+             and — in the web UI — Confirm / False-alarm review buttons
+  3. PDF   — printable formal report (reportlab) with screenshots and timeline
+
+The same template serves both the standalone HTML file and the in-app view;
+`interactive=True` adds review buttons, `include_player=True` embeds a video
+player that the timestamps seek.
 """
 
 from __future__ import annotations
+import base64
 import html as _html
+import io
 import json
-from datetime import datetime
+import os
+import re
 from pathlib import Path
+from urllib.parse import quote
 
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from loguru import logger
+from markupsafe import Markup
 
 from config.settings import settings, OUTPUT_DIR
-from src.utils.models import InvestigationReport, Violation
+from src.utils.models import InvestigationReport
 from src.utils.time_utils import format_human_time
+from src.report.theme import (
+    SEVERITY_ORDER, SEVERITY_COLORS, FALSE_ALARM_COLOR,
+    REVIEW_LABELS, REVIEW_COLORS, severity_color,
+)
+
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html", "j2"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
 
 
 def _e(value) -> str:
-    """Escape model/user text for HTML and for reportlab's mini-markup."""
+    """Escape model/user text for reportlab's mini-markup (and any raw HTML)."""
     return _html.escape(str(value if value is not None else ""), quote=True)
 
 
 def _file_stem(report_id: str) -> str:
     """Safe, short filename stem (keeps the historical 8-char uuid prefix)."""
-    import re
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(report_id))[:40] or "report"
     return f"report_{safe[:8] if len(safe) == 36 else safe}"
+
+
+def report_json_path(report_id: str, output_dir: str | Path | None = None) -> Path:
+    return Path(output_dir or OUTPUT_DIR) / f"{_file_stem(report_id)}.json"
 
 
 def _fmt_ts(seconds: float) -> str:
@@ -37,12 +64,89 @@ def _fmt_ts(seconds: float) -> str:
     return format_human_time(seconds)
 
 
+def _rule_source(rule: str) -> str:
+    r = str(rule).lower()
+    if "not verified" in r:
+        return "⚠ Unverified"
+    return "🌐 Universal Rule" if "universal" in r else "📋 From Lab Manual"
+
+
+def _duration(report: InvestigationReport) -> float:
+    try:
+        d = float(report.metadata.get("duration_sec") or 0)
+    except (TypeError, ValueError):
+        d = 0.0
+    latest = max([e.timestamp_sec for e in report.timeline] +
+                 [v.event.timestamp_sec for v in report.violations] + [0.0])
+    return max(d, latest + 1.0, 1.0)
+
+
+def _nice_tick_step(duration: float) -> float:
+    for step in (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200):
+        if duration / step <= 8:
+            return step
+    return 14400
+
+
+def timeline_svg(report: InvestigationReport) -> str:
+    """
+    SVG strip across the video's length with one marker per violation, coloured
+    by severity (false alarms grey). Markers carry data-seek for click-to-play.
+    """
+    W, H, PAD = 640, 96, 26
+    axis_y = 62
+    dur = _duration(report)
+    x = lambda t: PAD + (W - 2 * PAD) * min(max(t, 0.0), dur) / dur
+
+    parts = [f'<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" role="img" '
+             f'aria-label="Violation timeline">',
+             f'<rect x="{PAD}" y="{axis_y - 3}" width="{W - 2 * PAD}" height="6" rx="3" fill="#334155"/>']
+
+    step = _nice_tick_step(dur)
+    t = 0.0
+    while t <= dur + 1e-6:
+        xx = x(t)
+        parts.append(f'<line x1="{xx:.1f}" y1="{axis_y + 5}" x2="{xx:.1f}" y2="{axis_y + 11}" stroke="#475569"/>')
+        parts.append(f'<text x="{xx:.1f}" y="{axis_y + 26}" font-size="14" fill="#94a3b8" '
+                     f'text-anchor="middle" font-family="monospace">{_e(format_human_time(t))}</text>')
+        t += step
+
+    # Stagger markers that would overlap
+    rows_last_x = [-1e9, -1e9, -1e9]
+    for v in sorted(report.violations, key=lambda v: v.event.timestamp_sec):
+        ts = v.event.timestamp_sec
+        xx = x(ts)
+        row = next((i for i, lx in enumerate(rows_last_x) if xx - lx >= 20), 0)
+        rows_last_x[row] = xx
+        cy = axis_y - 17 - row * 17
+        fa = v.review_status == "false_alarm"
+        col = FALSE_ALARM_COLOR if fa else severity_color(v.severity)
+        fill = "none" if fa else col
+        title = f"{format_human_time(ts)} — {v.severity.upper()} — {v.violation_type}"
+        if v.review_status != "pending":
+            title += f" ({REVIEW_LABELS.get(v.review_status, v.review_status)})"
+        parts.append(
+            f'<g class="marker seek" data-seek="{ts:.2f}" style="cursor:pointer">'
+            f'<title>{_e(title)}</title>'
+            f'<line x1="{xx:.1f}" y1="{cy:.1f}" x2="{xx:.1f}" y2="{axis_y}" stroke="{col}" stroke-width="1.5" opacity="0.6"/>'
+            f'<circle cx="{xx:.1f}" cy="{cy:.1f}" r="8" fill="{fill}" stroke="{col}" stroke-width="2.5"/></g>')
+
+    if not report.violations:
+        parts.append(f'<text x="{W / 2}" y="{axis_y - 20}" font-size="13" fill="#64748b" '
+                     f'text-anchor="middle">No violations on the timeline</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 class ReportGenerator:
     """Renders InvestigationReport into JSON, HTML, and PDF outputs."""
+
+    THUMB_WIDTH = 480
 
     def __init__(self, output_dir: str | None = None):
         self.output_dir = Path(output_dir or str(OUTPUT_DIR))
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._thumb_cache: dict[str, str | None] = {}
 
     def generate_all(self, report: InvestigationReport) -> dict[str, str]:
         """Generate all configured output formats. Returns dict of format → path."""
@@ -74,243 +178,104 @@ class ReportGenerator:
     # ── HTML ──────────────────────────────────────────────────────────────────
 
     def to_html(self, report: InvestigationReport) -> str:
+        """Standalone HTML file: embedded screenshots + its own video player (if the video exists)."""
         path = self.output_dir / f"{_file_stem(report.report_id)}.html"
-        html = self._render_html(report)
+        html = self.render_html(report, interactive=False, include_player=True)
         path.write_text(html, encoding="utf-8")
         logger.info(f"HTML report saved: {path}")
         return str(path)
 
-    def _render_html(self, report: InvestigationReport) -> str:
-        risk_colors = {
-            "low": "#27ae60", "medium": "#f39c12",
-            "high": "#e67e22", "critical": "#e74c3c"
-        }
-        risk_color = risk_colors.get(report.overall_risk_level, "#7f8c8d")
+    def render_html(
+        self,
+        report: InvestigationReport,
+        interactive: bool = False,
+        include_player: bool = False,
+    ) -> str:
+        """
+        interactive    — show Confirm / False-alarm buttons (web UI only)
+        include_player — embed a <video> the timestamps seek (standalone file)
+        """
+        review_by_event = {v.event.event_id: v.review_status for v in report.violations}
+        events = []
+        for e in report.timeline:
+            if not e.potential_violation:
+                continue
+            events.append({
+                "ts": f"{e.timestamp_sec:.2f}",
+                "ts_label": _fmt_ts(e.timestamp_sec),
+                "description": e.description,
+                "objects": ", ".join(o for o in e.objects_involved[:4] if not str(o).startswith("lab_type:")),
+                "severity": e.severity,
+                "color": severity_color(e.severity),
+                "false_alarm": review_by_event.get(e.event_id) == "false_alarm",
+            })
 
-        # Timeline rows — VIOLATIONS ONLY (not every event)
-        timeline_rows = ""
-        violation_events = [e for e in report.timeline if e.potential_violation]
-        if not violation_events:
-            timeline_rows = '<tr><td colspan="4" style="padding:12px;text-align:center;color:#64748b;font-style:italic">No violations detected in timeline</td></tr>'
-        for e in violation_events:
-            badge_color = risk_colors.get(e.severity, "#475569")
-            objects_str = _e(", ".join(e.objects_involved[:4])) if e.objects_involved else "—"
-            # Show the violation hint if available
-            desc = _e(e.description)
-            timeline_rows += f"""
-            <tr>
-              <td style="white-space:nowrap;color:#FF7A59;font-weight:700;font-family:monospace">{_fmt_ts(e.timestamp_sec)}</td>
-              <td>{desc}</td>
-              <td style="color:#64748b;font-size:0.85em">{objects_str}</td>
-              <td><span class="badge" style="background:{badge_color}">{_e(e.severity.upper())}</span></td>
-            </tr>"""
-
-        # Violation cards
-        violation_cards = ""
-        warnings_html = ""
-        for warning in report.metadata.get("warnings", []) or []:
-            warnings_html += f'<div class="warning-banner">⚠ {_e(warning)}</div>'
-
+        violations = []
         for v in report.violations:
-            sop_quotes = ""
-            for ev in v.sop_evidence[:2]:
-                sop_quotes += f"""
-                <div class="evidence-box">
-                  <strong>{_e(ev.chunk.title)}</strong> (score: {ev.score:.2f})<br>
-                  {_e(ev.chunk.content[:350])}...
-                </div>"""
+            violations.append({
+                "v": v,
+                "ts": f"{v.event.timestamp_sec:.2f}",
+                "ts_label": _fmt_ts(v.event.timestamp_sec),
+                "color": severity_color(v.severity),
+                "rule_source": _rule_source(v.rule_violated),
+                "thumb": self._thumbnail_data_uri(v.event.frame_path),
+                "review_label": REVIEW_LABELS.get(v.review_status, v.review_status),
+                "review_color": REVIEW_COLORS.get(v.review_status, REVIEW_COLORS["pending"]),
+            })
 
-            incident_quotes = ""
-            for ev in v.similar_incidents[:2]:
-                incident_quotes += f"""
-                <div class="evidence-box">
-                  <strong>{_e(ev.chunk.title)}</strong> (score: {ev.score:.2f})<br>
-                  {_e(ev.chunk.content[:300])}...
-                </div>"""
+        template = _env.get_template("report.html.j2")
+        return template.render(
+            r=report,
+            generated_at=report.generated_at.strftime("%Y-%m-%d %H:%M UTC"),
+            risk_color=severity_color(report.overall_risk_level),
+            frames_sampled=report.metadata.get("frames_sampled", "-"),
+            warnings=report.metadata.get("warnings", []) or [],
+            review=report.review_counts(),
+            events=events,
+            violations=violations,
+            chart_svg=Markup(timeline_svg(report)),
+            legend=[(s, SEVERITY_COLORS[s]) for s in SEVERITY_ORDER],
+            false_alarm_color=FALSE_ALARM_COLOR,
+            interactive=interactive,
+            include_player=include_player,
+            video_uri=self._video_uri(report.video_path) if include_player else None,
+        )
 
-            rule_source = "🌐 Universal Rule" if "universal" in str(v.rule_violated).lower() else "📋 From Lab Manual"
-            badge_color = risk_colors.get(v.severity, "#7f8c8d")
-            violation_cards += f"""
-            <div class="violation-card">
-              <div class="v-header">
-                <span class="badge" style="background:{badge_color}">{_e(v.severity.upper())}</span>
-                <h3>{_e(v.violation_type)}</h3>
-                <span class="v-timestamp">⏱ {_fmt_ts(v.event.timestamp_sec)}</span>
-              </div>
-              <div class="source-tag">{rule_source}</div>
-              <div class="rule-box"><strong>Rule Violated:</strong> {_e(v.rule_violated)}</div>
-              <p class="explanation">{_e(v.explanation)}</p>
-              <div class="actions">
-                <div class="action-box immediate">
-                  <strong>⚡ Immediate</strong><span>{_e(v.immediate_action)}</span>
-                </div>
-                <div class="action-box recommended">
-                  <strong>🔧 Recommended</strong><span>{_e(v.recommended_action)}</span>
-                </div>
-                <div class="action-box preventive">
-                  <strong>🛡 Preventive</strong><span>{_e(v.preventive_measure)}</span>
-                </div>
-              </div>
-              <h4>SOP Evidence</h4>
-              {sop_quotes or '<div class="evidence-box">No SOP evidence retrieved.</div>'}
-              <h4>Similar Past Incidents</h4>
-              {incident_quotes or '<div class="evidence-box">No similar incidents found.</div>'}
-            </div>"""
+    # Backwards-compatible name
+    def _render_html(self, report: InvestigationReport) -> str:
+        return self.render_html(report)
 
+    def _thumbnail_data_uri(self, frame_path: str | None) -> str | None:
+        """Small JPEG of the evidence frame, inlined so the HTML file is self-contained."""
+        if not frame_path:
+            return None
+        if frame_path in self._thumb_cache:
+            return self._thumb_cache[frame_path]
+        uri = None
+        try:
+            if Path(frame_path).is_file():
+                from PIL import Image
+                with Image.open(frame_path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((self.THUMB_WIDTH, self.THUMB_WIDTH))
+                    buf = io.BytesIO()
+                    im.save(buf, format="JPEG", quality=72, optimize=True)
+                uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            logger.debug(f"Thumbnail failed for {frame_path}: {e}")
+        self._thumb_cache[frame_path] = uri
+        return uri
 
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LabSentinel-RAG Investigation Report</title>
-  <style>
-    :root {{
-      --bg: #0f172a; --surface: #1e293b; --border: #334155;
-      --primary: #3b82f6; --text: #e2e8f0; --muted: #94a3b8;
-      --red: #ef4444; --orange: #f97316; --yellow: #eab308; --green: #22c55e;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-      background: var(--bg); color: var(--text);
-      padding: 24px; max-width: 1100px; margin: 0 auto; line-height: 1.6;
-    }}
-    .header {{
-      background: linear-gradient(135deg, #0f172a, #1e3a5f);
-      border: 1px solid #1e3a5f; border-radius: 14px;
-      padding: 24px 30px; margin-bottom: 24px;
-    }}
-    .header h1 {{ font-size: 1.8em; font-weight: 800; color: #f8fafc; letter-spacing: -0.5px; }}
-    .header p  {{ color: var(--muted); margin-top: 4px; font-size: 0.88em; }}
-    h2 {{ color: #60a5fa; font-size: 1.1em; font-weight: 700; margin: 28px 0 12px;
-          text-transform: uppercase; letter-spacing: 0.8px; }}
-    h3 {{ color: var(--text); font-size: 1.0em; font-weight: 600; }}
-    h4 {{ color: var(--muted); font-size: 0.85em; font-weight: 600; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.5px; }}
-    .summary-box {{
-      background: var(--surface); border-left: 3px solid var(--primary);
-      padding: 14px 18px; border-radius: 8px; margin-bottom: 20px;
-      color: var(--text); font-size: 0.95em;
-    }}
-    .stats {{
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-      gap: 12px; margin-bottom: 24px;
-    }}
-    .stat-card {{
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 16px; text-align: center;
-    }}
-    .stat-card .num {{
-      font-size: 2.2em; font-weight: 800; color: var(--primary); line-height: 1;
-    }}
-    .stat-card .lbl {{ font-size: 0.75em; color: var(--muted); margin-top: 4px; }}
-    .risk-pill {{
-      display: inline-block; padding: 6px 20px; border-radius: 20px;
-      font-weight: 700; font-size: 0.9em; color: white; background: {risk_color};
-    }}
-    table {{ width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.88em; }}
-    th {{
-      background: #1a2744; color: #93c5fd; padding: 10px 12px;
-      text-align: left; font-weight: 600; font-size: 0.8em;
-      text-transform: uppercase; letter-spacing: 0.5px;
-    }}
-    td {{ padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); }}
-    tr:hover td {{ background: rgba(59,130,246,0.05); }}
-    .badge {{
-      display: inline-block; padding: 2px 10px; border-radius: 10px;
-      color: white; font-size: 0.75em; font-weight: 700;
-    }}
-    .violation-card {{
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 12px; padding: 20px; margin: 16px 0;
-    }}
-    .v-header {{
-      display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap;
-    }}
-    .v-header h3 {{ font-size: 1.05em; }}
-    .v-timestamp {{
-      background: rgba(59,130,246,0.15); color: #60a5fa;
-      padding: 2px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 600;
-    }}
-    .rule-box {{
-      background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2);
-      border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 0.88em;
-      color: #93c5fd;
-    }}
-    .source-tag {{
-      display: inline-block; margin-bottom: 8px; padding: 4px 10px; border-radius: 999px;
-      background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.35);
-      color: #bfdbfe; font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em;
-    }}
-    .warning-banner {{
-      background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35);
-      color: #fcd34d; border-radius: 8px; padding: 10px 12px; margin: 12px 0 18px;
-      font-size: 0.88em; font-weight: 600;
-    }}
-    .explanation {{ color: var(--muted); font-size: 0.9em; margin: 8px 0; }}
-    .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }}
-    .action-box {{ flex: 1; min-width: 180px; padding: 12px 14px; border-radius: 8px; font-size: 0.85em; }}
-    .immediate  {{ background: rgba(239,68,68,0.1);  border-left: 3px solid #ef4444; }}
-    .recommended{{ background: rgba(249,115,22,0.1); border-left: 3px solid #f97316; }}
-    .preventive {{ background: rgba(34,197,94,0.1);  border-left: 3px solid #22c55e; }}
-    .action-box strong {{ display: block; margin-bottom: 4px; color: var(--text); }}
-    .action-box span {{ color: var(--muted); }}
-    .evidence-box {{
-      background: rgba(255,255,255,0.03); border: 1px solid var(--border);
-      border-radius: 6px; padding: 10px 14px; margin: 6px 0; font-size: 0.83em; color: var(--muted);
-    }}
-    .evidence-box strong {{ color: #93c5fd; }}
-    ul li {{ margin: 6px 0; color: var(--muted); }}
-    ul li::marker {{ color: var(--primary); }}
-    .footer {{
-      text-align: center; color: #475569; margin-top: 40px; font-size: 0.8em;
-      border-top: 1px solid var(--border); padding-top: 16px;
-    }}
-  </style>
-</head>
-<body>
-
-<div class="header">
-  <h1>🔬 LabSentinel-RAG</h1>
-  <p>Multimodal Evidence-Grounded Laboratory Incident Investigation Report &nbsp;·&nbsp;
-     Report ID: {_e(report.report_id)} &nbsp;·&nbsp;
-     {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}</p>
-</div>
-
-<div class="stats">
-  <div class="stat-card"><div class="num">{len(report.timeline)}</div><div class="lbl">Events Detected</div></div>
-  <div class="stat-card"><div class="num">{report.total_violations}</div><div class="lbl">Violations</div></div>
-  <div class="stat-card"><div class="num">{report.metadata.get('frames_sampled','-')}</div><div class="lbl">Frames Analysed</div></div>
-  <div class="stat-card">
-    <div style="font-size:0.75em;color:var(--muted);margin-bottom:6px">RISK LEVEL</div>
-    <span class="risk-pill">{_e(report.overall_risk_level.upper())}</span>
-  </div>
-</div>
-
-<h2>Executive Summary</h2>
-{warnings_html}
-<div class="summary-box">{_e(report.incident_summary)}</div>
-
-<h2>Key Findings</h2>
-<ul>{"".join(f"<li>{_e(f)}</li>" for f in report.key_findings) or "<li>See violation details below.</li>"}</ul>
-
-<h2>Immediate Actions Required</h2>
-<ul>{"".join(f"<li>{_e(a)}</li>" for a in report.immediate_actions_required) or "<li>Review violation details and implement corrective actions.</li>"}</ul>
-
-<h2>Violation Timeline ({len(violation_events)} events)</h2>
-<table>
-  <thead><tr><th>Timestamp</th><th>Observation</th><th>Objects / Materials</th><th>Severity</th></tr></thead>
-  <tbody>{timeline_rows}</tbody>
-</table>
-
-<h2>Confirmed Violations ({report.total_violations})</h2>
-{violation_cards or '<p style="color:var(--muted)">No violations confirmed in this incident.</p>'}
-
-<div class="footer">
-  Generated by LabSentinel-RAG &nbsp;·&nbsp; {_e(report.video_path)}
-</div>
-</body>
-</html>"""
+    def _video_uri(self, video_path: str) -> str | None:
+        """Relative link from the report folder to the video (works when opened locally)."""
+        try:
+            p = Path(video_path)
+            if not p.is_file():
+                return None
+            rel = os.path.relpath(p.resolve(), self.output_dir.resolve())
+            return quote(rel.replace(os.sep, "/"))
+        except Exception:
+            return None
 
     # ── PDF ───────────────────────────────────────────────────────────────────
 
@@ -321,63 +286,54 @@ class ReportGenerator:
         from reportlab.lib.units import cm
         from reportlab.lib import colors
         from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
+            Image as RLImage,
         )
 
         path = self.output_dir / f"{_file_stem(report.report_id)}.pdf"
 
         doc = SimpleDocTemplate(
-            str(path),
-            pagesize=A4,
-            rightMargin=2 * cm,
-            leftMargin=2 * cm,
-            topMargin=2 * cm,
-            bottomMargin=2 * cm,
+            str(path), pagesize=A4,
+            rightMargin=2 * cm, leftMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
         )
         styles = getSampleStyleSheet()
-        risk_color_map = {
-            "low": colors.green, "medium": colors.orange,
-            "high": colors.darkorange, "critical": colors.red,
-        }
-        rc = risk_color_map.get(report.overall_risk_level, colors.grey)
+        rc = colors.HexColor(severity_color(report.overall_risk_level))
 
         story = []
         title_style = ParagraphStyle("Title", parent=styles["Title"], textColor=colors.HexColor("#2c3e50"), fontSize=18)
         h2_style = ParagraphStyle("H2", parent=styles["Heading2"], textColor=colors.HexColor("#3498db"))
-        h3_style = ParagraphStyle("H3", parent=styles["Heading3"], textColor=colors.HexColor("#2c3e50"))
+        h3_style = ParagraphStyle("H3", parent=styles["Heading3"], textColor=colors.HexColor("#2c3e50"),
+                                  keepWithNext=1)
         body_style = styles["BodyText"]
+        small_style = ParagraphStyle("Small", parent=body_style, fontSize=8, textColor=colors.HexColor("#64748b"))
 
-        # Header
         story.append(Paragraph("LabSentinel-RAG Investigation Report", title_style))
         story.append(Paragraph(
             f"Report ID: {_e(report.report_id)} | Generated: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
-            styles["Normal"]
-        ))
+            styles["Normal"]))
         story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498db")))
         story.append(Spacer(1, 0.4 * cm))
 
-        # Risk level
         story.append(Paragraph(
-            f"Overall Risk Level: <font color='{rc.hexval() if hasattr(rc,'hexval') else '#e74c3c'}'><b>{_e(report.overall_risk_level.upper())}</b></font>",
-            body_style
-        ))
+            f"Overall Risk Level: <font color='{rc.hexval()}'><b>{_e(report.overall_risk_level.upper())}</b></font>",
+            body_style))
         story.append(Spacer(1, 0.3 * cm))
 
-        # Summary
         story.append(Paragraph("Executive Summary", h2_style))
         story.append(Paragraph(_e(report.incident_summary), body_style))
         for w in report.metadata.get("warnings", []) or []:
             story.append(Paragraph(f"<font color='#b45309'><b>Warning:</b> {_e(w)}</font>", body_style))
         story.append(Spacer(1, 0.4 * cm))
 
-        # Stats table
+        rv = report.review_counts()
         data = [
-            ["Events Detected", "Violations Confirmed", "Frames Analysed", "Duration"],
+            ["Events Detected", "Violations", "Confirmed / False alarm", "Frames Analysed", "Duration"],
             [
                 str(len(report.timeline)),
                 str(report.total_violations),
+                f"{rv['confirmed']} / {rv['false_alarm']}",
                 str(report.metadata.get("frames_sampled", "-")),
-                f"{report.metadata.get('duration_sec', '-')}s",
+                _fmt_ts(report.metadata.get("duration_sec", 0) or 0),
             ],
         ]
         t = Table(data, hAlign="LEFT")
@@ -385,33 +341,105 @@ class ReportGenerator:
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
         ]))
         story.append(t)
-        story.append(Spacer(1, 0.5 * cm))
+        story.append(Spacer(1, 0.4 * cm))
 
-        # Violations
+        story.append(Paragraph("Violation Timeline", h2_style))
+        story.append(self._pdf_timeline(report, doc.width))
+        story.append(Spacer(1, 0.4 * cm))
+
         story.append(Paragraph(f"Confirmed Violations ({report.total_violations})", h2_style))
         for i, v in enumerate(report.violations, 1):
-            story.append(Paragraph(f"{i}. [{_e(v.severity.upper())}] {_e(v.violation_type)} @ {_fmt_ts(v.event.timestamp_sec)}", h3_style))
-            story.append(Paragraph(f"<b>Rule Violated:</b> {_e(v.rule_violated)}", body_style))
-            story.append(Paragraph(f"<b>Explanation:</b> {_e(v.explanation)}", body_style))
-            story.append(Paragraph(f"<b>Immediate Action:</b> {_e(v.immediate_action)}", body_style))
-            story.append(Paragraph(f"<b>Recommended Action:</b> {_e(v.recommended_action)}", body_style))
+            block = []
+            block.append(Paragraph(
+                f"{i}. [{_e(v.severity.upper())}] {_e(v.violation_type)} @ {_fmt_ts(v.event.timestamp_sec)}", h3_style))
+            if v.review_status != "pending":
+                col = REVIEW_COLORS.get(v.review_status, "#64748b")
+                block.append(Paragraph(
+                    f"<font color='{col}'><b>Review:</b> {_e(REVIEW_LABELS.get(v.review_status, v.review_status))}</font>",
+                    ParagraphStyle("Rev", parent=body_style, keepWithNext=1)))
+
+            text = [
+                Paragraph(f"<b>Rule Violated:</b> {_e(v.rule_violated)}", body_style),
+                Paragraph(f"<b>Explanation:</b> {_e(v.explanation)}", body_style),
+                Paragraph(f"<b>Immediate Action:</b> {_e(v.immediate_action)}", body_style),
+                Paragraph(f"<b>Recommended Action:</b> {_e(v.recommended_action)}", body_style),
+            ]
             if v.preventive_measure:
-                story.append(Paragraph(f"<b>Preventive Measure:</b> {_e(v.preventive_measure)}", body_style))
+                text.append(Paragraph(f"<b>Preventive Measure:</b> {_e(v.preventive_measure)}", body_style))
+
+            img = self._pdf_image(v.event.frame_path, RLImage, max_w=6.2 * cm)
+            if img is not None:
+                cap = Paragraph(f"Frame @ {_fmt_ts(v.event.timestamp_sec)}", small_style)
+                tbl = Table([[text, [img, cap]]], colWidths=[doc.width - 6.6 * cm, 6.6 * cm])
+                tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                         ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+                block.append(tbl)
+            else:
+                block.extend(text)
 
             if v.sop_evidence:
                 best = v.sop_evidence[0]
-                story.append(Paragraph(
+                block.append(Paragraph(
                     f"<b>Top SOP Reference:</b> {_e(best.chunk.title)} (similarity: {best.score:.2f})<br/>"
-                    f"<i>{_e(best.chunk.content[:250])}...</i>",
-                    body_style
-                ))
-            story.append(Spacer(1, 0.3 * cm))
+                    f"<i>{_e(best.chunk.content[:250])}...</i>", body_style))
+            block.append(Spacer(1, 0.3 * cm))
+            story.extend(block)
 
         doc.build(story)
         logger.info(f"PDF report saved: {path}")
         return str(path)
+
+    @staticmethod
+    def _pdf_image(frame_path, RLImage, max_w):
+        try:
+            if not frame_path or not Path(frame_path).is_file():
+                return None
+            from PIL import Image
+            with Image.open(frame_path) as im:
+                w, h = im.size
+            return RLImage(frame_path, width=max_w, height=max_w * h / max(w, 1))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _pdf_timeline(report: InvestigationReport, width: float):
+        from reportlab.graphics.shapes import Drawing, Line, Circle, String, Rect
+        from reportlab.lib import colors
+
+        H = 60
+        pad = 10
+        axis_y = 22
+        dur = _duration(report)
+        d = Drawing(width, H)
+        x = lambda t: pad + (width - 2 * pad) * min(max(t, 0.0), dur) / dur
+
+        d.add(Rect(pad, axis_y - 2, width - 2 * pad, 4, fillColor=colors.HexColor("#cbd5e1"), strokeColor=None))
+        step = _nice_tick_step(dur)
+        t = 0.0
+        while t <= dur + 1e-6:
+            xx = x(t)
+            d.add(Line(xx, axis_y - 4, xx, axis_y - 8, strokeColor=colors.HexColor("#94a3b8")))
+            d.add(String(xx, axis_y - 17, format_human_time(t), fontSize=6.5, fillColor=colors.HexColor("#64748b"),
+                         textAnchor="middle", fontName="Courier"))
+            t += step
+
+        rows_last_x = [-1e9, -1e9, -1e9]
+        for v in sorted(report.violations, key=lambda v: v.event.timestamp_sec):
+            xx = x(v.event.timestamp_sec)
+            row = next((i for i, lx in enumerate(rows_last_x) if xx - lx >= 9), 0)
+            rows_last_x[row] = xx
+            cy = axis_y + 10 + row * 9
+            fa = v.review_status == "false_alarm"
+            col = colors.HexColor(FALSE_ALARM_COLOR if fa else severity_color(v.severity))
+            d.add(Line(xx, axis_y + 2, xx, cy, strokeColor=col, strokeWidth=0.8))
+            d.add(Circle(xx, cy, 3.5, fillColor=None if fa else col, strokeColor=col, strokeWidth=1))
+        if not report.violations:
+            d.add(String(width / 2, axis_y + 12, "No violations on the timeline", fontSize=8,
+                         fillColor=colors.HexColor("#64748b"), textAnchor="middle"))
+        return d

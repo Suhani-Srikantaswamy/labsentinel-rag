@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LabSentinel-RAG Investigation Report</title>
+  <style>
+    .lsr {
+      --bg: #0f172a; --surface: #1e293b; --border: #334155;
+      --primary: #3b82f6; --text: #e2e8f0; --muted: #94a3b8;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      padding: 24px; max-width: 1100px; margin: 0 auto; line-height: 1.6;
+      box-sizing: border-box;
+    }
+    .lsr * { box-sizing: border-box; }
+    body.lsr-page { margin: 0; background: #0f172a; }
+    .lsr .header {
+      background: linear-gradient(135deg, #0f172a, #1e3a5f);
+      border: 1px solid #1e3a5f; border-radius: 14px;
+      padding: 24px 30px; margin-bottom: 24px;
+    }
+    .lsr .header h1 { font-size: 1.8em; font-weight: 800; color: #f8fafc; letter-spacing: -0.5px; margin: 0; }
+    .lsr .header p  { color: var(--muted); margin: 4px 0 0; font-size: 0.88em; }
+    .lsr h2 { color: #60a5fa; font-size: 1.1em; font-weight: 700; margin: 28px 0 12px;
+              text-transform: uppercase; letter-spacing: 0.8px; }
+    .lsr h3 { color: var(--text); font-size: 1.05em; font-weight: 600; margin: 0; }
+    .lsr h4 { color: var(--muted); font-size: 0.85em; font-weight: 600; margin: 12px 0 6px;
+              text-transform: uppercase; letter-spacing: 0.5px; }
+    .lsr .summary-box {
+      background: var(--surface); border-left: 3px solid var(--primary);
+      padding: 14px 18px; border-radius: 8px; margin-bottom: 20px; font-size: 0.95em;
+    }
+    .lsr .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .lsr .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; text-align: center; }
+    .lsr .stat-card .num { font-size: 2.2em; font-weight: 800; color: var(--primary); line-height: 1; }
+    .lsr .stat-card .lbl { font-size: 0.75em; color: var(--muted); margin-top: 4px; }
+    .lsr .stat-card .sub { font-size: 0.7em; color: var(--muted); margin-top: 6px; }
+    .lsr .risk-pill { display: inline-block; padding: 6px 20px; border-radius: 20px; font-weight: 700; font-size: 0.9em; color: white; }
+    .lsr table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.88em; }
+    .lsr th { background: #1a2744; color: #93c5fd; padding: 10px 12px; text-align: left; font-weight: 600;
+              font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.5px; }
+    .lsr td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top; }
+    .lsr tr.is-false-alarm td { opacity: 0.5; }
+    .lsr .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; color: white; font-size: 0.75em; font-weight: 700; }
+    .lsr .seek { cursor: pointer; }
+    .lsr .ts-link { white-space: nowrap; color: #FF7A59; font-weight: 700; font-family: monospace; cursor: pointer; }
+    .lsr .ts-link:hover { text-decoration: underline; }
+    .lsr .chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 6px; }
+    .lsr .chart svg { width: 100%; height: auto; display: block; }
+    .lsr .chart .marker:hover circle { stroke: #fff; stroke-width: 2; }
+    .lsr .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.75em; color: var(--muted); margin-top: 6px; }
+    .lsr .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                                background: var(--c); margin-right: 5px; vertical-align: middle; }
+    .lsr .violation-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
+    .lsr .violation-card.is-false-alarm { opacity: 0.6; border-style: dashed; }
+    .lsr .v-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .lsr .v-timestamp { display: inline-block; background: rgba(59,130,246,0.15); color: #60a5fa; padding: 2px 10px;
+                        border-radius: 12px; font-size: 0.8em; font-weight: 600; cursor: pointer; user-select: none; }
+    .lsr .v-timestamp:hover { background: rgba(59,130,246,0.3); }
+    .lsr .v-body { display: flex; gap: 18px; flex-wrap: wrap; }
+    .lsr .v-main { flex: 1 1 380px; min-width: 0; }
+    .lsr .v-shot { flex: 0 0 300px; max-width: 100%; }
+    .lsr .v-shot img { width: 100%; border-radius: 8px; border: 1px solid var(--border); display: block; cursor: pointer; }
+    .lsr .v-shot .cap { font-size: 0.72em; color: var(--muted); margin-top: 4px; text-align: center; }
+    .lsr .rule-box { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2); border-radius: 6px;
+                     padding: 10px 14px; margin: 10px 0; font-size: 0.88em; color: #93c5fd; }
+    .lsr .source-tag { display: inline-block; margin-bottom: 8px; padding: 4px 10px; border-radius: 999px;
+                       background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.35);
+                       color: #bfdbfe; font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; }
+    .lsr .warning-banner { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35); color: #fcd34d;
+                           border-radius: 8px; padding: 10px 12px; margin: 12px 0 18px; font-size: 0.88em; font-weight: 600; }
+    .lsr .explanation { color: var(--muted); font-size: 0.9em; margin: 8px 0; }
+    .lsr .actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+    .lsr .action-box { flex: 1; min-width: 180px; padding: 12px 14px; border-radius: 8px; font-size: 0.85em; }
+    .lsr .immediate   { background: rgba(239,68,68,0.1);  border-left: 3px solid #ef4444; }
+    .lsr .recommended { background: rgba(249,115,22,0.1); border-left: 3px solid #f97316; }
+    .lsr .preventive  { background: rgba(34,197,94,0.1);  border-left: 3px solid #22c55e; }
+    .lsr .action-box strong { display: block; margin-bottom: 4px; color: var(--text); }
+    .lsr .action-box span { color: var(--muted); }
+    .lsr .evidence-box { background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px;
+                         padding: 10px 14px; margin: 6px 0; font-size: 0.83em; color: var(--muted);
+                         overflow-wrap: anywhere; word-break: break-word; }
+    .lsr .rule-box, .lsr .explanation, .lsr td { overflow-wrap: anywhere; }
+    .lsr .evidence-box strong { color: #93c5fd; }
+    .lsr .review { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px;
+                   padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.82em; }
+    .lsr .review-status { font-weight: 700; padding: 3px 10px; border-radius: 999px; color: #fff; }
+    .lsr .review-btn { display: inline-block; border: 1px solid var(--border); background: rgba(255,255,255,0.04);
+                       color: var(--text); padding: 5px 12px; border-radius: 8px; cursor: pointer; font-size: 0.95em;
+                       user-select: none; }
+    .lsr .review-btn:hover { border-color: #FF7A59; color: #FF7A59; }
+    .lsr .review-btn.active { background: rgba(255,122,89,0.15); border-color: #FF7A59; }
+    .lsr ul { padding-left: 20px; }
+    .lsr ul li { margin: 6px 0; color: var(--muted); }
+    .lsr .player { background: #000; border-radius: 10px; overflow: hidden; margin-bottom: 8px; }
+    .lsr .player video { width: 100%; max-height: 420px; display: block; }
+    .lsr .player-note { font-size: 0.75em; color: var(--muted); margin-bottom: 20px; }
+    .lsr .footer { text-align: center; color: #475569; margin-top: 40px; font-size: 0.8em;
+                   border-top: 1px solid var(--border); padding-top: 16px; word-break: break-all; }
+  </style>
+</head>
+<body class="lsr-page">
+<div class="lsr" id="lsr-report" data-report-id="{{ r.report_id }}">
+
+<div class="header">
+  <h1>🔬 LabSentinel-RAG</h1>
+  <p>Multimodal Evidence-Grounded Laboratory Incident Investigation Report &nbsp;·&nbsp;
+     Report ID: {{ r.report_id }} &nbsp;·&nbsp; {{ generated_at }}</p>
+</div>
+
+{% if include_player and video_uri %}
+<div class="player"><video id="lsr-video" controls preload="metadata" src="{{ video_uri }}"></video></div>
+<div class="player-note">Click any timestamp, chart marker or screenshot to jump to that moment.</div>
+{% endif %}
+
+<div class="stats">
+  <div class="stat-card"><div class="num">{{ r.timeline|length }}</div><div class="lbl">Events Detected</div></div>
+  <div class="stat-card"><div class="num">{{ r.total_violations }}</div><div class="lbl">Violations</div>
+    {% if r.total_violations %}<div class="sub">✓ {{ review.confirmed }} confirmed · ✗ {{ review.false_alarm }} false · {{ review.pending }} pending</div>{% endif %}
+  </div>
+  <div class="stat-card"><div class="num">{{ frames_sampled }}</div><div class="lbl">Frames Analysed</div></div>
+  <div class="stat-card">
+    <div style="font-size:0.75em;color:var(--muted);margin-bottom:6px">RISK LEVEL</div>
+    <span class="risk-pill" style="background:{{ risk_color }}">{{ r.overall_risk_level|upper }}</span>
+  </div>
+</div>
+
+<h2>Executive Summary</h2>
+{% for w in warnings %}<div class="warning-banner">⚠ {{ w }}</div>{% endfor %}
+<div class="summary-box">{{ r.incident_summary }}</div>
+
+<h2>Violation Timeline</h2>
+<div class="chart">
+  {{ chart_svg }}
+  <div class="legend">
+    {% for sev, col in legend %}<span style="--c:{{ col }}">{{ sev|capitalize }}</span>{% endfor %}
+    <span style="--c:{{ false_alarm_color }}">False alarm</span>
+  </div>
+</div>
+
+<h2>Key Findings</h2>
+<ul>
+  {% for f in r.key_findings %}<li>{{ f }}</li>{% else %}<li>See violation details below.</li>{% endfor %}
+</ul>
+
+<h2>Immediate Actions Required</h2>
+<ul>
+  {% for a in r.immediate_actions_required %}<li>{{ a }}</li>{% else %}<li>Review violation details and implement corrective actions.</li>{% endfor %}
+</ul>
+
+<h2>Flagged Events ({{ events|length }})</h2>
+<table>
+  <thead><tr><th>Timestamp</th><th>Observation</th><th>Objects / Materials</th><th>Severity</th></tr></thead>
+  <tbody>
+  {% for e in events %}
+    <tr>
+      <td><span class="ts-link seek" data-seek="{{ e.ts }}" title="Jump to {{ e.ts_label }}">▶ {{ e.ts_label }}</span></td>
+      <td>{{ e.description }}</td>
+      <td style="color:#64748b;font-size:0.85em">{{ e.objects or "—" }}</td>
+      <td><span class="badge" style="background:{{ e.color }}">{{ e.severity|upper }}</span></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" style="padding:12px;text-align:center;color:#64748b;font-style:italic">No violations detected in timeline</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Confirmed Violations ({{ r.total_violations }})</h2>
+{% for item in violations %}
+{% set v = item.v %}
+<div class="violation-card{% if v.review_status == 'false_alarm' %} is-false-alarm{% endif %}" id="v-{{ v.violation_id }}">
+  <div class="v-header">
+    <span class="badge" style="background:{{ item.color }}">{{ v.severity|upper }}</span>
+    <h3>{{ v.violation_type }}</h3>
+    <span class="v-timestamp seek" role="button" tabindex="0" data-seek="{{ item.ts }}" title="Jump to this moment">⏱ {{ item.ts_label }} ▶</span>
+  </div>
+  <div class="v-body">
+    <div class="v-main">
+      <div class="source-tag">{{ item.rule_source }}</div>
+      <div class="rule-box"><strong>Rule Violated:</strong> {{ v.rule_violated }}</div>
+      <p class="explanation">{{ v.explanation }}</p>
+    </div>
+    {% if item.thumb %}
+    <div class="v-shot">
+      <img class="seek" data-seek="{{ item.ts }}" src="{{ item.thumb }}" alt="Video frame at {{ item.ts_label }}" loading="lazy">
+      <div class="cap">Frame @ {{ item.ts_label }} — click to play</div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="actions">
+    <div class="action-box immediate"><strong>⚡ Immediate</strong><span>{{ v.immediate_action }}</span></div>
+    <div class="action-box recommended"><strong>🔧 Recommended</strong><span>{{ v.recommended_action }}</span></div>
+    <div class="action-box preventive"><strong>🛡 Preventive</strong><span>{{ v.preventive_measure }}</span></div>
+  </div>
+  <h4>SOP Evidence</h4>
+  {% for ev in v.sop_evidence[:2] %}
+    <div class="evidence-box"><strong>{{ ev.chunk.title }}</strong> (score: {{ "%.2f"|format(ev.score) }})<br>{{ ev.chunk.content[:350] }}...</div>
+  {% else %}
+    <div class="evidence-box">No SOP evidence retrieved.</div>
+  {% endfor %}
+  <h4>Similar Past Incidents</h4>
+  {% for ev in v.similar_incidents[:2] %}
+    <div class="evidence-box"><strong>{{ ev.chunk.title }}</strong> (score: {{ "%.2f"|format(ev.score) }})<br>{{ ev.chunk.content[:300] }}...</div>
+  {% else %}
+    <div class="evidence-box">No similar incidents found.</div>
+  {% endfor %}
+  <div class="review">
+    <span class="review-status" style="background:{{ item.review_color }}">{{ item.review_label }}</span>
+    {% if v.reviewed_at %}<span style="color:var(--muted)">{{ v.reviewed_at.strftime('%Y-%m-%d %H:%M UTC') }}</span>{% endif %}
+    {% if interactive %}
+      <span style="flex:1"></span>
+      <span role="button" tabindex="0" class="review-btn{% if v.review_status == 'confirmed' %} active{% endif %}"
+              data-review="{{ r.report_id }}|{{ v.violation_id }}|confirmed">✓ Confirm</span>
+      <span role="button" tabindex="0" class="review-btn{% if v.review_status == 'false_alarm' %} active{% endif %}"
+              data-review="{{ r.report_id }}|{{ v.violation_id }}|false_alarm">✗ False alarm</span>
+      {% if v.review_status != 'pending' %}
+      <span role="button" tabindex="0" class="review-btn" data-review="{{ r.report_id }}|{{ v.violation_id }}|pending">↺ Undo</span>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<p style="color:var(--muted)">No violations confirmed in this incident.</p>
+{% endfor %}
+
+<div class="footer">Generated by LabSentinel-RAG &nbsp;·&nbsp; {{ r.video_path }}</div>
+</div>
+
+{% if include_player and video_uri %}
+<script>
+document.addEventListener('click', function (e) {
+  var el = e.target.closest ? e.target.closest('[data-seek]') : null;
+  if (!el) return;
+  var v = document.getElementById('lsr-video');
+  if (!v) return;
+  v.currentTime = parseFloat(el.getAttribute('data-seek')) || 0;
+  v.play();
+  v.scrollIntoView({ behavior: 'smooth', block: 'center' });
+});
+</script>
+{% endif %}
+</body>
+</html>

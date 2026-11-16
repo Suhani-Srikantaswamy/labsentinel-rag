@@ -174,7 +174,10 @@ class DocumentLoader:
         incident_dir: str | Path | None = None,
     ) -> list[DocumentChunk]:
         """Load all documents from the three directories (explicit args override defaults)."""
-        import config.settings as cfg   # read at call time so overrides on the module are honoured
+        # Read at call time so overrides are honoured. NB: `import config.settings as x` would
+        # give the settings *object* (config/__init__ re-exports it), so fetch the module itself.
+        import importlib
+        cfg = importlib.import_module("config.settings")
         chunks: list[DocumentChunk] = []
         sources = [
             (Path(sop_dir or cfg.SOP_DIR),           "sop"),
