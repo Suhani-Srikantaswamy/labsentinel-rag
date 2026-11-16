@@ -43,6 +43,21 @@ class GeminiClient:
         self._client  = self._make(keys[0])
         logger.info(f"GeminiClient — model: {model} | {len(keys)} key(s)")
 
+    @staticmethod
+    def _is_blocked_project_error(error: Exception | str) -> bool:
+        msg = str(error).lower()
+        if "permission_denied" not in msg and "403" not in msg and "project unavailable" not in msg:
+            return False
+        blocked_markers = (
+            "free tier is not available",
+            "project unavailable",
+            "billing to upgrade to the paid tier",
+            "this project is unavailable",
+            "not available for this project",
+            "billing",
+        )
+        return any(marker in msg for marker in blocked_markers)
+
     def _make(self, key):
         return self._genai.Client(api_key=key)
 
@@ -61,17 +76,33 @@ class GeminiClient:
             try:
                 return self._call(prompt, images, temperature, max_tokens)
             except Exception as e:
+                if self._is_blocked_project_error(e):
+                    msg = (
+                        "Gemini API access is blocked for this project.\n\n"
+                        "The Google project behind this key is not allowed to use the Gemini API "
+                        "for free-tier access, and billing/project access is not enabled.\n\n"
+                        "Fix:\n"
+                        "  1. Open https://aistudio.google.com and confirm the project is enabled\n"
+                        "  2. Turn on billing or create a new Gemini-enabled project\n"
+                        "  3. Add a valid key to .env (GOOGLE_API_KEY=...)\n"
+                        "  4. Restart the app"
+                    )
+                    logger.error(msg)
+                    raise RuntimeError(msg) from e
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     if self._rotate():
                         continue
-                    raise RuntimeError(
-                        f"All {len(self._keys)} Gemini key(s) have hit their daily quota.\n\n"
+                    msg = (
+                        f"All {len(self._keys)} configured Gemini API key(s) are exhausted.\n\n"
+                        "Please add a new key or wait for the daily quota to reset.\n\n"
                         "To fix:\n"
                         "  1. Add more keys to .env (GOOGLE_API_KEY_2=..., GOOGLE_API_KEY_3=...)\n"
                         "  2. Get free keys at https://aistudio.google.com/apikey\n"
-                        "  3. Or wait until midnight UTC for quota reset\n"
-                        "  4. Or reduce Max Frames to 10 in Advanced Settings"
-                    ) from e
+                        "  3. Wait until midnight UTC for quota reset\n"
+                        "  4. Reduce Max Frames to 10 in Advanced Settings"
+                    )
+                    logger.error(msg)
+                    raise RuntimeError(msg) from e
                 raise
 
     def _call(self, prompt, images, temperature, max_tokens) -> LLMResponse:

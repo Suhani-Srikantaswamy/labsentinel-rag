@@ -23,54 +23,49 @@ from src.utils.time_utils import format_human_time
 
 
 VIOLATION_PROMPT = """\
-You are a certified laboratory safety investigator.
+You are a certified laboratory safety investigator specialising in {lab_type} laboratories.
 
 {manual_context}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DETECTED EVENT (from video frame analysis)
+DETECTED EVENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Timestamp  : {timestamp}s  ← this is the EXACT video time of the violation
+Lab type   : {lab_type}
+Timestamp  : {timestamp}s
 Description: {description}
 Objects    : {objects}
 Actions    : {actions}
-AI severity estimate: {vlm_severity}
+AI severity: {vlm_severity}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RETRIEVED PASSAGES FROM THE LAB MANUAL / SOPs
+RETRIEVED PASSAGES FROM MANUAL / SOPs
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {sop_evidence}
 
-RETRIEVED EQUIPMENT / PROCEDURE NOTES
+EQUIPMENT / PROCEDURE NOTES
 {manual_evidence}
 
 SIMILAR PAST INCIDENTS
 {incident_evidence}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-YOUR TASK
+YOUR TASK — apply rules for a {lab_type} laboratory
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Only confirm a violation when it is directly supported by the evidence and visible in the scene.
-2. If the evidence is ambiguous, incomplete, or not actually visible, say false.
-3. Cite the EXACT rule from the manual above. If not in manual, state the universal principle.
-4. Give the EXACT timestamp (already provided above — use it verbatim).
-5. Explain specifically what went wrong and the concrete danger it creates.
-6. Give clear, actionable recommendations specific to what was observed.
+1. Is this a genuine safety violation for a {lab_type} lab?
+   Only confirm if the evidence directly supports it.
+2. Cite the EXACT rule — from the manual if present, or "Universal [{lab_type}]: ..."
+3. Explain what went wrong and the specific danger for this lab type.
+4. Give actionable recommendations appropriate for this lab type.
 
-Rules for citation:
-- Quote the specific section/clause number and text if available.
-- If the manual does not cover this, start your rule_violated with "Universal: ".
-- NEVER cite a rule that is not relevant to what was actually observed.
-
-Respond ONLY with a valid JSON object — no prose, no markdown fences:
+Respond ONLY with valid JSON — no prose, no markdown:
 {{
   "is_violation": <true|false>,
-  "violation_type": "<PPE | Chemical Handling | Equipment Misuse | Fire Hazard | Biological Safety | Waste Disposal | Emergency Procedure | Food/Drink | Other>",
-  "rule_violated": "<exact quote or section from the manual, or 'Universal: ...' if not in manual>",
-  "explanation": "<2-3 sentences: exactly what was observed, why it violates the rule, and the specific danger>",
+  "violation_type": "<PPE | Chemical Handling | Equipment Misuse | Fire Hazard | Biological Safety | Electrical Safety | Ergonomics | Waste Disposal | Emergency | Food/Drink | Other>",
+  "rule_violated": "<exact quote from manual, or 'Universal [{lab_type}]: ...' if not in manual>",
+  "explanation": "<2-3 sentences: what was observed, why it violates the rule, the specific danger>",
   "severity": "<low|medium|high|critical>",
   "timestamp_sec": {timestamp},
-  "immediate_action": "<specific action needed RIGHT NOW — name the person and the action>",
+  "immediate_action": "<specific action needed RIGHT NOW>",
   "recommended_action": "<corrective action for next 24-72 hours>",
   "preventive_measure": "<systemic change to prevent recurrence>"
 }}
@@ -103,8 +98,19 @@ Respond ONLY with a valid JSON object — no prose, no markdown fences:
 
 _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 _NO_MANUAL_CTX = (
-    "No lab manual was uploaded. Apply universal laboratory safety principles "
-    "(PPE requirements, chemical handling, equipment safety, emergency procedures)."
+    "No lab manual was uploaded. The AI will identify the lab type from the video "
+    "and apply appropriate rules for that lab type.\n"
+)
+
+_UNIVERSAL_RULES_FOOTER = (
+    "\nUNIVERSAL RULES (apply for anything not explicitly in the manual above):\n"
+    "Chemistry/Biology: lab coat + gloves + eye protection mandatory; no eating/drinking; "
+    "containers labelled; fume hood sash at working height; centrifuge balanced.\n"
+    "Physics/Engineering: appropriate PPE for equipment; no loose clothing near machinery; guards in place; "
+    "lockout/tagout before service; no exposed wiring/bypassed interlocks.\n"
+    "Computer Science: no food/drink near equipment; no trip hazards; exits clear; cables managed.\n"
+    "Medical/Clinical: appropriate PPE and sharps disposal; disinfect equipment between uses; biohazard waste managed correctly.\n"
+    "All labs: no working alone with hazardous materials; closed-toe shoes; exits clear.\n"
 )
 
 
@@ -123,6 +129,7 @@ class ViolationReasoner:
         manual_ctx = _build_manual_ctx(manual_text)
         prompt = VIOLATION_PROMPT.format(
             manual_context     = manual_ctx,
+            lab_type           = next((o.split(":")[1] for o in event.objects_involved if o.startswith("lab_type:")), "general"),
             timestamp          = event.timestamp_sec,
             description        = event.description,
             objects            = ", ".join(event.objects_involved) or "N/A",
@@ -257,4 +264,5 @@ def _build_manual_ctx(text: str, max_chars: int = 6000) -> str:
         "───────────────────────────────────────────\n"
         f"{t}\n"
         "───────────────────────────────────────────"
+        + _UNIVERSAL_RULES_FOOTER
     )

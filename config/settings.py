@@ -43,9 +43,9 @@ class LLMConfig(BaseModel):
     reasoning_model: str = Field(
         default_factory=lambda: os.getenv("LABSENTINEL_REASONING_MODEL", "gpt-4o")
     )
-    # Gemini model — gemini-3.5-flash-lite works with vision and has higher quota
+    # Gemini model — gemini-3.5-flash is stable and supports vision
     gemini_model: str = Field(
-        default_factory=lambda: os.getenv("LABSENTINEL_GEMINI_MODEL", "gemini-3.5-flash-lite")
+        default_factory=lambda: os.getenv("LABSENTINEL_GEMINI_MODEL", "gemini-3.5-flash")
     )
     temperature: float = float(os.getenv("LABSENTINEL_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LABSENTINEL_MAX_TOKENS", "4096"))

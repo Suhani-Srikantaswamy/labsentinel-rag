@@ -94,6 +94,10 @@ class ReportGenerator:
 
         # Violation cards
         violation_cards = ""
+        warnings_html = ""
+        for warning in report.metadata.get("warnings", []) or []:
+            warnings_html += f'<div class="warning-banner">⚠ {warning}</div>'
+
         for v in report.violations:
             sop_quotes = ""
             for ev in v.sop_evidence[:2]:
@@ -111,6 +115,7 @@ class ReportGenerator:
                   {ev.chunk.content[:300]}...
                 </div>"""
 
+            rule_source = "🌐 Universal Rule" if "universal" in str(v.rule_violated).lower() else "📋 From Lab Manual"
             badge_color = risk_colors.get(v.severity, "#7f8c8d")
             violation_cards += f"""
             <div class="violation-card">
@@ -119,7 +124,8 @@ class ReportGenerator:
                 <h3>{v.violation_type}</h3>
                 <span class="v-timestamp">⏱ {_fmt_ts(v.event.timestamp_sec)}</span>
               </div>
-              <div class="rule-box">📋 <strong>Rule Violated:</strong> {v.rule_violated}</div>
+              <div class="source-tag">{rule_source}</div>
+              <div class="rule-box"><strong>Rule Violated:</strong> {v.rule_violated}</div>
               <p class="explanation">{v.explanation}</p>
               <div class="actions">
                 <div class="action-box immediate">
@@ -224,6 +230,16 @@ class ReportGenerator:
       border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 0.88em;
       color: #93c5fd;
     }}
+    .source-tag {{
+      display: inline-block; margin-bottom: 8px; padding: 4px 10px; border-radius: 999px;
+      background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.35);
+      color: #bfdbfe; font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em;
+    }}
+    .warning-banner {{
+      background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35);
+      color: #fcd34d; border-radius: 8px; padding: 10px 12px; margin: 12px 0 18px;
+      font-size: 0.88em; font-weight: 600;
+    }}
     .explanation {{ color: var(--muted); font-size: 0.9em; margin: 8px 0; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }}
     .action-box {{ flex: 1; min-width: 180px; padding: 12px 14px; border-radius: 8px; font-size: 0.85em; }}
@@ -265,6 +281,7 @@ class ReportGenerator:
 </div>
 
 <h2>Executive Summary</h2>
+{warnings_html}
 <div class="summary-box">{report.incident_summary}</div>
 
 <h2>Key Findings</h2>

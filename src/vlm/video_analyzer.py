@@ -29,8 +29,7 @@ from .video_chunker import extract_frames_chunked, get_video_info
 # describe what it sees. This dramatically reduces missed violations.
 
 FRAME_PROMPT = """\
-You are a conservative laboratory safety auditor. Only flag clear, directly observable safety violations.
-Do NOT guess; do NOT flag a violation based on uncertainty alone. Only use what is visible in this frame and the previous frame context.
+You are a trained laboratory safety auditor reviewing CCTV footage.
 
 {manual_context}
 
@@ -38,54 +37,78 @@ PREVIOUS FRAME (t={prev_ts}s): {prev_context}
 
 Analyse this frame at timestamp {timestamp}s.
 
-MANDATORY CHECKLIST — answer every item, do not skip:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — IDENTIFY THE LAB TYPE from visual clues in the frame:
+- Chemistry lab: fume hoods, chemical bottles, glassware, Bunsen burners, centrifuges, titration equipment
+- Biology/Microbiology: biosafety cabinets, petri dishes, microscopes, autoclaves, biohazard symbols, pipettes
+- Physics lab: lasers, optics tables, oscilloscopes, electrical apparatus, high-voltage signs
+- Engineering/Workshop: machinery, lathes, welding equipment, tools, metal work
+- Computer Science/IT: computers, servers, monitors, cables — no chemicals
+- Medical/Clinical: blood samples, sterile packaging, clinical equipment, IV equipment
+- General/Unknown: apply broad principles
 
-PPE CHECK (for EVERY person visible):
-□ Lab coat: is it being worn AND fastened right now? If not worn → VIOLATION
-□ Gloves: on BOTH hands right now? If not → VIOLATION
-□ Eye protection (goggles/glasses): physically ON their face? If not → VIOLATION
-□ Closed-toe shoes visible? If sandals/bare feet → VIOLATION
-□ Long hair tied back? If loose hair near equipment → VIOLATION
-□ Food, drink, phone at bench? If yes → VIOLATION
+STEP 2 — APPLY RULES BASED ON THE LAB TYPE IDENTIFIED:
 
-CHEMICAL SAFETY:
-□ Any unlabelled containers? → VIOLATION
-□ Any open/uncapped containers not being actively used? → VIOLATION
-□ Any chemical work happening outside a fume hood? → VIOLATION
-□ Acid, base, or solvent being poured without splash goggles? → VIOLATION
+CHEMISTRY lab rules:
+□ Lab coat worn and fastened?
+□ Chemical splash goggles worn (not just safety glasses) when handling liquids?
+□ Gloves on both hands when near chemicals?
+□ Fume hood sash at or below working height when using volatile chemicals?
+□ All containers labelled with name, concentration, date?
+□ No open containers left unattended?
+□ No flames within 3 metres of flammable solvents?
 
-EQUIPMENT SAFETY:
-□ Fume hood sash above the marked working height line? → VIOLATION
-□ Centrifuge running with lid open or imbalanced samples? → VIOLATION
-□ Hotplate/heater left unattended? → VIOLATION
-□ Cracked, chipped, or damaged glassware in use? → VIOLATION
+BIOLOGY lab rules:
+□ Lab coat worn and fastened?
+□ Gloves on both hands?
+□ Eye protection worn when handling liquids?
+□ Biosafety cabinet sash at correct operating height?
+□ No mouth pipetting (must use mechanical pipette aids)?
+□ Sharps going directly into rigid sharps containers?
+□ Biohazard waste in labelled biohazard bags?
+□ Surfaces decontaminated before and after use?
 
-ENVIRONMENT:
-□ Spill not being cleaned up? → VIOLATION
-□ Emergency exit or aisle blocked? → VIOLATION
-□ Waste disposed in wrong container? → VIOLATION
+PHYSICS/ENGINEERING lab rules:
+□ Appropriate PPE for the equipment (safety glasses, ear defenders, hard hat)?
+□ No loose clothing or jewellery near rotating machinery?
+□ Machinery guards in place?
+□ Laser safety eyewear worn if lasers visible?
+□ No exposed electrical wiring?
 
-IMPORTANT RULES:
-- Only set potential_violation=true when the frame shows a specific, direct violation or an obviously missing PPE item.
-- Equipment safety violations are valid even when no person is visible in the frame. For example, a centrifuge with an obviously unbalanced load or a raised/sash hazard is still a violation.
-- For centrifuges: if there are visibly unbalanced sample positions, an obvious empty balance slot, or 5 of 6 positions loaded, flag it as a clear equipment safety violation.
-- If PPE is not visible, mark it as cannot_determine rather than missing. Do not over-flag uncertainty.
-- If there is no direct violation, set potential_violation=false and severity="none".
-- Use confidence values that match the evidence level; a definite PPE omission can be 0.8+, uncertain visibility should be lower.
+COMPUTER SCIENCE/IT lab rules:
+□ No food or drink near computers or servers?
+□ No trip hazards from loose cables?
+□ No water or liquids near electrical equipment?
+□ Emergency exits clear?
+
+ALL lab types — always check:
+□ No eating, drinking, or phone use at the work bench?
+□ Emergency exits and aisles clear of obstructions?
+□ Appropriate closed-toe footwear worn?
+□ Long hair tied back near equipment?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RULES FOR FLAGGING:
+- Apply ONLY the rules relevant to the lab type you identified
+- Do NOT apply chemistry rules in a computer science lab
+- If PPE is not visible but the activity requires it → flag as missing
+- If no people are present but equipment is in a hazardous state → still flag
+- potential_violation=true if ANY rule is broken
 
 Respond ONLY with valid JSON — no prose, no markdown:
 {{
+  "lab_type": "<chemistry|biology|physics|engineering|computer_science|medical|general>",
   "description": "<1-2 sentence factual description>",
   "people_count": <number>,
   "objects_involved": ["<every item visible>"],
   "actions_observed": ["<every action>"],
   "ppe_status": {{
-    "lab_coat": "<worn|missing|cannot_determine>",
-    "gloves": "<worn|missing|cannot_determine>",
-    "eye_protection": "<worn|missing|cannot_determine>",
-    "closed_toe_shoes": "<worn|missing|cannot_determine>"
+    "lab_coat": "<worn|missing|not_required|cannot_determine>",
+    "gloves": "<worn|missing|not_required|cannot_determine>",
+    "eye_protection": "<worn|missing|not_required|cannot_determine>",
+    "other_ppe": "<any other PPE observation>"
   }},
-  "checklist_findings": ["<every issue found, be specific>"],
+  "checklist_findings": ["<every issue found, with specific detail>"],
   "potential_violation": <true|false>,
   "violation_hint": "<describe every issue found>",
   "severity": "<none|low|medium|high|critical>",
@@ -127,16 +150,50 @@ Respond ONLY with a valid JSON object — no prose, no markdown fences:
 """
 
 _NO_MANUAL_CTX = """\
-LAB MANUAL: None uploaded.
-Apply universal laboratory safety principles:
-- PPE mandatory: lab coat, gloves, eye protection when handling chemicals or biological material
-- No eating, drinking, or phone use in the laboratory
-- All chemical containers must be labelled and capped when not in use
-- Volatile chemicals must be handled in a fume hood with sash at working height
-- Centrifuge loads must be balanced before running
-- No unattended heating equipment
-- Spills must be contained immediately with appropriate spill kit
-- Emergency exits and aisles must remain clear at all times
+LAB MANUAL: None uploaded. The AI will identify the lab type from the video and apply appropriate rules.
+"""
+
+# Universal rules appended to ALL manual contexts — these fill gaps the manual may not cover
+_UNIVERSAL_RULES = """\
+UNIVERSAL SAFETY BASELINES (apply these for anything the manual does not explicitly cover):
+
+For CHEMISTRY/BIOLOGY labs:
+- Lab coat, gloves, and eye protection mandatory at all times near chemicals or biological material
+- No eating, drinking, or phone use at the bench
+- All containers must be labelled (name, concentration, date)
+- Fume hood sash at or below working height line during all chemical work
+- Centrifuge samples balanced; lid closed during run
+- Spills cleaned up immediately with appropriate spill kit
+- Sharps in puncture-resistant containers only
+- Emergency exits and aisles must remain clear
+
+For PHYSICS/ENGINEERING labs:
+- Appropriate PPE for equipment in use (safety glasses, ear protection as needed)
+- No loose clothing or jewellery near rotating machinery
+- Guards in place on all machinery
+- Lockout/tagout before maintenance or repair
+- No exposed electrical wiring or bypassed interlocks
+- Keep aisles and walkways clear around machines
+
+For COMPUTER SCIENCE/IT labs:
+- No food or drink near electrical equipment
+- No water or liquids near computers
+- Cables managed to prevent trip hazards
+- Surge-protected equipment only; no overloaded power strips
+- Emergency exits clear
+
+For MEDICAL/CLINICAL labs:
+- Appropriate PPE for patient-facing or biohazard procedures
+- Sharps disposed in approved puncture-resistant containers only
+- Clean/disinfect equipment between patient or sample handling steps
+- Waste and biohazard bins used correctly and not overfilled
+- No blocked emergency access or patient pathways
+
+For ALL labs regardless of type:
+- No working alone with hazardous materials
+- Appropriate closed-toe footwear
+- Long hair tied back near equipment
+- Never block fire exits or safety equipment access
 """
 
 
@@ -272,6 +329,7 @@ class VideoAnalyzer:
             data = _sanitize_frame_result(data)
 
             # Combine checklist findings into the objects list for downstream retrieval
+            lab_type   = data.get("lab_type", "general")
             objects    = data.get("objects_involved", [])
             chk        = data.get("checklist_findings", [])
             ppe_status = data.get("ppe_status", {})
@@ -288,8 +346,8 @@ class VideoAnalyzer:
                 event_id            = str(uuid.uuid4()),
                 timestamp_sec       = frame["timestamp_sec"],
                 frame_index         = frame["frame_index"],
-                description         = data.get("description", ""),
-                objects_involved    = objects + chk,
+                description         = f"[{lab_type.upper()} LAB] {data.get('description', '')}",
+                objects_involved    = objects + chk + [f"lab_type:{lab_type}"],
                 actions_observed    = data.get("actions_observed", []),
                 potential_violation = bool(data.get("potential_violation", False)),
                 severity            = severity,
@@ -455,24 +513,26 @@ def _collapse_adjacent_events(events: list[DetectedEvent]) -> list[DetectedEvent
 
 def _build_manual_context(manual_text: str) -> str:
     """
-    Build the manual context block.
-    Truncates at ~10,000 chars to stay within token limits while maximising coverage.
-    Uses a higher limit than before so more of the manual fits.
+    Build the context block injected into every frame prompt.
+    - If a manual is provided: use it as the primary authority
+    - Universal rules are ALWAYS appended so basic violations are never missed
+      even when the manual doesn't explicitly cover them
     """
     if not manual_text or not manual_text.strip():
-        return _NO_MANUAL_CTX
+        return _NO_MANUAL_CTX + _UNIVERSAL_RULES
 
     text = manual_text.strip()
-    if len(text) > 10_000:
-        cut  = text.rfind("\n", 0, 10_000)  # cut at newline, not mid-word
-        text = text[:cut] + "\n[... manual continues — additional sections available via retrieval ...]"
+    if len(text) > 9_000:
+        cut  = text.rfind("\n", 0, 9_000)
+        text = text[:cut] + "\n[... manual truncated — additional sections available via retrieval ...]"
 
     return (
-        "LAB MANUAL (uploaded by user — treat as authoritative over any general knowledge):\n"
+        "LAB MANUAL (uploaded by user — treat as primary authority):\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{text}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Also apply universal lab safety principles for anything not covered above.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "ADDITIONAL UNIVERSAL RULES (apply these for anything not covered by the manual above):\n"
+        + _UNIVERSAL_RULES
     )
 
 

@@ -86,6 +86,37 @@ def report(event, violation) -> InvestigationReport:
     )
 
 
+# ── Port Fallback Tests ───────────────────────────────────────────────────────
+
+class TestPortFallback:
+    def test_resolve_gradio_port_uses_next_available_port(self):
+        import socket
+        import app
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("0.0.0.0", 0))
+        sock.listen(1)
+        reserved_port = sock.getsockname()[1]
+        resolved = app._resolve_gradio_port(reserved_port)
+
+        assert resolved != reserved_port
+        sock.close()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", resolved))
+
+
+class TestGeminiProjectAccess:
+    def test_blocked_project_error_is_detected(self):
+        from src.utils.llm_client import GeminiClient
+
+        err = RuntimeError(
+            "403 PERMISSION_DENIED. {'error': {'message': 'The Gemini API free tier is not available for this project. To use the Gemini API, please set up billing to upgrade to the paid tier.'}}"
+        )
+
+        assert GeminiClient._is_blocked_project_error(err) is True
+
+
 # ── Model Tests ───────────────────────────────────────────────────────────────
 
 class TestModels:
@@ -205,6 +236,35 @@ class TestReportGenerator:
         html = Path(path).read_text()
         assert "PPE Failure" in html
         assert "SOP-LAB-001" in html
+
+    def test_html_marks_universal_rule_badge(self, report, tmp_path):
+        from src.report.report_generator import ReportGenerator
+        report.violations[0].rule_violated = "Universal [chemistry]: PPE required at all times"
+        gen = ReportGenerator(output_dir=str(tmp_path))
+        html = Path(gen.to_html(report)).read_text()
+        assert "🌐 Universal Rule" in html
+
+    def test_manual_lab_mismatch_detected(self):
+        import app
+
+        assert app.detect_manual_lab_mismatch("chemistry", "computer_science") is True
+        assert app.detect_manual_lab_mismatch("biology", "biology") is False
+        assert app.detect_manual_lab_mismatch("general", "chemistry") is False
+
+    def test_universal_rules_cover_supported_lab_types(self):
+        import app
+        from src.vlm.video_analyzer import _UNIVERSAL_RULES
+        from src.reasoning.violation_reasoner import _UNIVERSAL_RULES_FOOTER
+
+        for lab in ["chemistry", "biology", "physics", "engineering", "computer_science", "medical", "general"]:
+            assert lab in app.LAB_TYPE_ALIASES
+
+        assert "CHEMISTRY/BIOLOGY" in _UNIVERSAL_RULES
+        assert "PHYSICS/ENGINEERING" in _UNIVERSAL_RULES
+        assert "COMPUTER SCIENCE/IT" in _UNIVERSAL_RULES
+        assert "MEDICAL/CLINICAL" in _UNIVERSAL_RULES
+        assert "all labs regardless of type" in _UNIVERSAL_RULES.lower()
+        assert "medical/clinical" in _UNIVERSAL_RULES_FOOTER.lower()
 
 
 # ── Retriever Query Builder Tests ─────────────────────────────────────────────

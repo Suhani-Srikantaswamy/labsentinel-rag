@@ -3,13 +3,45 @@ LabSentinel-RAG — Production Web Application
 ClimbingAddict-inspired design: dark dashboard, orange accents, light/dark toggle.
 """
 from __future__ import annotations
-import hashlib, json, os, shutil, tempfile, threading, time
+import hashlib, json, os, shutil, socket, tempfile, threading, time
 from pathlib import Path
 from queue import Queue, Empty
 import gradio as gr
 from loguru import logger
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
+
+def _resolve_gradio_port(port: int | str | None = None) -> int:
+    if port is None:
+        port = os.getenv("GRADIO_PORT", "7860")
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 7860
+
+    if port <= 0:
+        port = 7860
+
+    if _is_port_free(port):
+        return port
+
+    for candidate in range(port + 1, port + 101):
+        if _is_port_free(candidate):
+            logger.warning(f"Port {port} is occupied; using free port {candidate} instead.")
+            return candidate
+
+    raise RuntimeError(f"No free Gradio port found near {port}. Please set GRADIO_PORT to an unused port.")
+
 
 def _api_ok():
     from src.utils.llm_client import get_provider_info
@@ -98,6 +130,61 @@ def _combine_manuals(files):
         t = _extract_text(str(f))
         if t.strip(): parts.append(f"=== {Path(str(f)).name} ===\n{t}")
     return "\n\n".join(parts)
+
+
+LAB_TYPE_ALIASES = {
+    "chemistry": {"chemistry", "chem", "chemical", "lab_chemistry", "chemistry_lab"},
+    "biology": {"biology", "biological", "biolab", "bio_lab", "microbiology"},
+    "physics": {"physics", "physical", "physics_lab", "mechanical"},
+    "engineering": {"engineering", "engineer", "materials", "electronics", "electrical"},
+    "computer_science": {"computer_science", "computer science", "cs", "it", "software", "cyber"},
+    "medical": {"medical", "hospital", "clinical", "healthcare", "pharmacy"},
+    "general": {"general", "mixed", "universal", "all", "standard"},
+}
+
+
+def _normalize_lab_type(value):
+    if value is None:
+        return "general"
+    text = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if not text:
+        return "general"
+    for canonical, aliases in LAB_TYPE_ALIASES.items():
+        if text == canonical or text in aliases:
+            return canonical
+        if text.startswith(canonical):
+            return canonical
+    if "computer" in text and "science" in text:
+        return "computer_science"
+    if text.startswith("bio"):
+        return "biology"
+    if text.startswith("chem"):
+        return "chemistry"
+    if "med" in text:
+        return "medical"
+    return "general"
+
+
+def _infer_lab_type_from_manual(manual_text: str) -> str:
+    if not manual_text or not manual_text.strip():
+        return "general"
+    lowered = manual_text.lower()
+    for canonical, aliases in LAB_TYPE_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return canonical
+    return "general"
+
+
+def detect_manual_lab_mismatch(video_lab_type, manual_lab_type):
+    """Return True if the uploaded manual clearly targets a different lab type than the video evidence."""
+    video_type = _normalize_lab_type(video_lab_type)
+    manual_type = _normalize_lab_type(manual_lab_type)
+    if not manual_type or manual_type == "general":
+        return False
+    if not video_type or video_type == "general":
+        return False
+    return video_type != manual_type
+
 
 def _url_cache_path(url: str) -> Path:
     from config.settings import VIDEO_DIR
@@ -197,6 +284,9 @@ def investigate(video_file, video_url, manual_files,
     manual_label = (f"{len([f for f in (manual_files or []) if f])} file(s), {len(manual_text):,} chars"
                     if manual_text else "No manual — universal rules applied")
 
+    if not manual_text.strip():
+        gr.Info("No lab manual uploaded — continuing with universal safety rules.")
+    
     progress(0.15, desc="Starting investigation …")
     pq = Queue(); holder = {}
     t  = threading.Thread(target=_run_pipeline,
@@ -213,11 +303,49 @@ def investigate(video_file, video_url, manual_files,
     t.join(timeout=15)
 
     if "error" in holder:
-        return _err("Investigation Failed", [holder["error"]]), "{}", None, _stat("❌", holder["error"][:80]), "", _load_history(5)
+        err = holder["error"]
+        if "Gemini API access is blocked" in err or "free tier is not available" in err.lower() or "billing" in err.lower():
+            return _err("Gemini project blocked", [
+                "The configured Google project cannot use Gemini right now.",
+                "This normally means the project does not have Gemini enabled or billing is not active.",
+                "Open https://aistudio.google.com, enable the correct project, turn on billing if needed, and add a valid key to .env.",
+                "Then restart the app and try again.",
+            ]), "{}", None, _stat("❌", "Gemini project blocked"), "", _load_history(5)
+        if "All " in err and "Gemini API key" in err and "exhausted" in err.lower():
+            return _err("All API keys are exhausted", [
+                "Every configured Gemini API key has reached its daily quota.",
+                "Add another key in .env (GOOGLE_API_KEY_2=..., GOOGLE_API_KEY_3=...) or wait for the quota to reset.",
+                "You can also reduce Max Frames in Advanced Settings to use fewer requests.",
+            ]), "{}", None, _stat("❌", "All API keys exhausted"), "", _load_history(5)
+        return _err("Investigation Failed", [err]), "{}", None, _stat("❌", err[:80]), "", _load_history(5)
 
     report = holder.get("report")
     if not report:
         return _err("No Result", ["Pipeline returned no report."]), "{}", None, _stat("❌", "No report"), "", _load_history(5)
+
+    video_lab_type = "general"
+    for event in report.timeline:
+        for entry in event.objects_involved:
+            if entry.startswith("lab_type:"):
+                video_lab_type = entry.split(":", 1)[1]
+                break
+        if video_lab_type != "general":
+            break
+
+    manual_lab_type = _infer_lab_type_from_manual(manual_text)
+    mismatch = detect_manual_lab_mismatch(video_lab_type, manual_lab_type)
+    if mismatch:
+        gr.Warning(f"Manual lab type mismatch: the uploaded manual looks like {manual_lab_type}, but the video appears to be {video_lab_type}. Review the rule set before relying on the report.")
+        report.metadata["warnings"] = [
+            f"Manual lab type mismatch: uploaded manual ({manual_lab_type}) does not match the video lab type ({video_lab_type})."
+        ]
+    elif manual_text.strip():
+        report.metadata["warnings"] = []
+    else:
+        report.metadata["warnings"] = ["No manual uploaded — universal safety rules were applied."]
+    report.metadata["manual_lab_type"] = manual_lab_type
+    report.metadata["video_lab_type"] = video_lab_type
+    report.metadata["manual_label"] = manual_label
 
     progress(0.97, desc="Rendering report …")
     from src.report.report_generator import ReportGenerator
@@ -1035,13 +1163,15 @@ document.addEventListener('click', function(e) {
   if (card) {
     const reportPath = card.getAttribute('data-history-id');
     if (reportPath) {
-      const target = document.getElementById('history-target');
+      const appRoot = document.querySelector('gradio-app')?.shadowRoot || document;
+      const target = appRoot.getElementById ? appRoot.getElementById('history-target') : null;
       const input = target ? target.querySelector('input, textarea') : null;
       if (input) {
         input.value = reportPath;
         input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      const btn = document.getElementById('history-load-btn');
+      const btn = appRoot.getElementById ? appRoot.getElementById('history-load-btn') : null;
       if (btn) {
         btn.click();
       }
@@ -1197,7 +1327,7 @@ def create_app():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port  = int(os.getenv("GRADIO_PORT", "7860"))
+    port  = _resolve_gradio_port(os.getenv("GRADIO_PORT", "7860"))
     share = os.getenv("GRADIO_SHARE", "false").lower() == "true"
     app   = create_app()
     app.launch(
