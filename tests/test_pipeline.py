@@ -537,3 +537,156 @@ class TestLoadAllDirectories:
         chunks = DocumentLoader().load_all(sop_dir=tmp_path / "s", manual_dir=empty, incident_dir=empty)
         assert chunks and all(c.source_type == "sop" for c in chunks)
         DocumentLoader().load_all()   # defaults must not raise
+
+
+
+class TestRepeatSightings:
+    def _ev(self, i, t, people=(), scene=(), desc="x"):
+        from src.utils.models import PersonObservation
+        return DetectedEvent(event_id=str(i), timestamp_sec=t, frame_index=i, description=desc,
+                             potential_violation=True, severity="high", confidence=0.9,
+                             people=[PersonObservation(person_id=p, issues=list(iss)) for p, iss in people],
+                             scene_issues=list(scene))
+
+    def test_same_person_same_issue_merged(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        evs = [self._ev(1, 10, [("P1", ["missing_gloves"])]),
+               self._ev(2, 300, [("P1", ["missing_gloves"])]),
+               self._ev(3, 900, [("P1", ["missing_gloves"])])]
+        out, merged = _merge_repeat_sightings(evs)
+        assert len(out) == 1 and merged == 2 and out[0].repeat_timestamps == [300, 900]
+
+    def test_different_person_or_issue_still_flagged(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        evs = [self._ev(1, 10, [("P1", ["missing_gloves"])]),
+               self._ev(2, 60, [("P2", ["missing_gloves"])]),            # different person
+               self._ev(3, 90, [("P1", ["eating_drinking"])])]           # same person, new issue
+        out, merged = _merge_repeat_sightings(evs)
+        assert len(out) == 3 and merged == 0
+
+    def test_mixed_new_and_repeat_kept_and_recorded(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        evs = [self._ev(1, 10, [("P1", ["missing_gloves"])]),
+               self._ev(2, 60, [("P1", ["missing_gloves", "phone_use"])])]
+        out, merged = _merge_repeat_sightings(evs)
+        assert len(out) == 2 and out[0].repeat_timestamps == [60]
+
+    def test_scene_hazard_repeat_window(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        evs = [self._ev(1, 10, scene=["spill"]), self._ev(2, 60, scene=["spill"]),
+               self._ev(3, 2000, scene=["spill"])]                     # long gap → new spill
+        out, merged = _merge_repeat_sightings(evs)
+        assert len(out) == 2 and merged == 1
+
+    def test_untracked_events_never_merged(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        evs = [self._ev(1, 10, desc="a"), self._ev(2, 50, desc="a"),
+               self._ev(3, 90, [("P?", ["missing_gloves"])]), self._ev(4, 120, [("P?", ["missing_gloves"])])]
+        out, _ = _merge_repeat_sightings(evs)
+        assert len(out) == 4
+
+    def test_parse_people_normalises_ids_and_issues(self):
+        from src.vlm.video_analyzer import _parse_people
+        data = {"people_count": 2, "scene_issues": ["Spilled liquid"],
+                "people": [{"person_id": "p1", "appearance": "red top", "issues": ["No goggles", "none"]},
+                           {"person_id": "weird", "appearance": "green top", "issues": ["food on bench"]}]}
+        people, scene = _parse_people(data, [], {"P1": "red top"})
+        assert [p.person_id for p in people] == ["P1", "P2"]
+        assert people[0].issues == ["missing_eye_protection"] and people[1].issues == ["eating_drinking"]
+        assert scene == ["spill"]
+
+    def test_parse_people_attributes_missing_ppe_to_single_person(self):
+        from src.vlm.video_analyzer import _parse_people
+        people, _ = _parse_people({"people_count": 1, "people": [{"person_id": "P3", "appearance": "x", "issues": []}]},
+                                  ["gloves"], {})
+        assert people[0].issues == ["missing_gloves"]
+
+
+class TestAlreadyReported:
+    def test_kept_event_lists_previously_reported_issues(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        from src.utils.models import PersonObservation
+        mk = lambda i, t, iss: DetectedEvent(event_id=str(i), timestamp_sec=t, frame_index=i, description="x",
+            potential_violation=True, severity="high", confidence=0.9,
+            people=[PersonObservation(person_id="P2", issues=iss)])
+        out, _ = _merge_repeat_sightings([mk(1, 12, ["missing_gloves"]), mk(2, 48, ["missing_gloves", "spill"])])
+        assert out[1].already_reported == ["P2: missing gloves"]
+
+    def test_reasoner_prompt_includes_already_reported(self, monkeypatch):
+        from src.reasoning import violation_reasoner as vr
+        from src.utils.llm_client import LLMResponse
+        seen = {}
+        class Fake:
+            def chat(self, prompt, **k):
+                seen["p"] = prompt; return LLMResponse('{"is_violation": false}')
+        monkeypatch.setattr(vr, "get_client", lambda *a, **k: Fake())
+        ev = DetectedEvent(event_id="1", timestamp_sec=48, frame_index=1, description="x",
+                           potential_violation=True, already_reported=["P2: missing gloves"])
+        vr.ViolationReasoner().analyse_event(ev, {}, "")
+        assert "ALREADY REPORTED EARLIER (do NOT report these again): P2: missing gloves" in seen["p"]
+
+    def test_scene_issue_not_double_counted(self):
+        from src.vlm.video_analyzer import _parse_people
+        people, scene = _parse_people({"people_count": 1, "scene_issues": ["unsafe_chemical_handling", "spill", "eating_drinking"],
+            "people": [{"person_id": "P1", "appearance": "x", "issues": ["unsafe_chemical_handling"]}]}, [], {})
+        assert scene == ["spill"] and people[0].issues == ["unsafe_chemical_handling", "eating_drinking"]
+
+
+class TestMultiViolationReasoning:
+    def _reasoner(self, monkeypatch, reply):
+        from src.reasoning import violation_reasoner as vr
+        from src.utils.llm_client import LLMResponse
+        class Fake:
+            def chat(self, prompt, **k): return LLMResponse(reply)
+        monkeypatch.setattr(vr, "get_client", lambda *a, **k: Fake())
+        return vr.ViolationReasoner()
+
+    def _event(self, already=()):
+        from src.utils.models import PersonObservation
+        return DetectedEvent(event_id="e", timestamp_sec=12, frame_index=1, description="x", potential_violation=True,
+                             severity="high", people=[PersonObservation(person_id="P1", issues=["missing_gloves", "eating_drinking"])],
+                             scene_issues=["spill"], already_reported=list(already))
+
+    def test_one_event_can_yield_several_violations(self, monkeypatch):
+        r = self._reasoner(monkeypatch, json.dumps({"violations": [
+            {"violation_type": "PPE", "issues": ["missing_gloves"], "person_ids": ["P1"], "severity": "high"},
+            {"violation_type": "Chemical Handling", "issues": ["spill"], "person_ids": [], "severity": "medium"},
+            {"violation_type": "Food/Drink", "issues": ["eating_drinking"], "person_ids": ["P1"], "severity": "medium"}]}))
+        out = r.analyse_event_all(self._event(), {}, "")
+        assert [v.violation_type for v in out] == ["PPE", "Chemical Handling", "Food/Drink"]
+        assert out[0].person_ids == ["P1"] and out[1].person_ids == []
+
+    def test_already_reported_entries_dropped(self, monkeypatch):
+        r = self._reasoner(monkeypatch, json.dumps({"violations": [
+            {"violation_type": "PPE", "issues": ["missing_gloves"], "person_ids": ["P1"]},
+            {"violation_type": "Food/Drink", "issues": ["eating_drinking"], "person_ids": ["P1"]}]}))
+        out = r.analyse_event_all(self._event(already=["P1: missing gloves"]), {}, "")
+        assert [v.violation_type for v in out] == ["Food/Drink"]
+
+    def test_repeat_times_are_per_issue(self):
+        from src.vlm.video_analyzer import _merge_repeat_sightings
+        from src.utils.models import PersonObservation, Violation
+        mk = lambda i, t, iss, scene=(): DetectedEvent(event_id=str(i), timestamp_sec=t, frame_index=i, description="x",
+            potential_violation=True, severity="high", people=[PersonObservation(person_id="P1", issues=iss)],
+            scene_issues=list(scene))
+        out, _ = _merge_repeat_sightings([mk(1, 12, ["missing_gloves"], ["spill"]), mk(2, 300, ["missing_gloves"])])
+        ev = out[0]
+        ppe = Violation(violation_id="a", event=ev, violation_type="PPE", rule_violated="r", explanation="e",
+                        severity="high", issues=["missing_gloves"], person_ids=["P1"])
+        spill = Violation(violation_id="b", event=ev, violation_type="Spill", rule_violated="r", explanation="e",
+                          severity="medium", issues=["spill"], person_ids=[])
+        assert ppe.repeat_times() == [300] and spill.repeat_times() == []
+
+
+class TestSceneOnlyIssues:
+    def test_object_hazard_on_person_moved_to_scene(self):
+        from src.vlm.video_analyzer import _parse_people, _merge_repeat_sightings
+        p1, s1 = _parse_people({"people_count": 1, "scene_issues": ["unlabelled_container"],
+                                "people": [{"person_id": "P1", "appearance": "x", "issues": ["missing_gloves"]}]}, [], {})
+        p2, s2 = _parse_people({"people_count": 1, "scene_issues": [],
+                                "people": [{"person_id": "P1", "appearance": "x", "issues": ["unlabelled_container"]}]}, [], {})
+        assert s1 == s2 == ["unlabelled_container"] and p2[0].issues == []
+        mk = lambda i, t, ppl, sc: DetectedEvent(event_id=str(i), timestamp_sec=t, frame_index=i, description="x",
+                                                 potential_violation=True, people=ppl, scene_issues=sc)
+        out, merged = _merge_repeat_sightings([mk(1, 36, p1, s1), mk(2, 42, p2, s2)])
+        assert len(out) == 1 and merged == 1

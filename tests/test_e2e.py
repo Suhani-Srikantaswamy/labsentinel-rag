@@ -25,22 +25,29 @@ MANUAL = (
 
 
 class FakeLLM:
-    """Deterministic stand-in for Gemini. Scenes: 0–10s ok, 10–20s no goggles,
-    20–30s ok (24s returns garbage), 30–40s spill."""
+    """Deterministic stand-in for Gemini. Scenes: 0–10s ok, 10–20s P1 no goggles,
+    20–30s ok (24s returns garbage), 30–40s spill, 40–50s P1 no goggles AGAIN (repeat)."""
+
+    P1 = "blue lab coat, short dark hair, left bench"
 
     def __init__(self):
         self.calls = {"frame": 0, "timeline": 0, "violation": 0, "summary": 0}
+        self.known_people_prompts = []
 
     def chat(self, prompt, images=None, temperature=0.1, max_tokens=900):
         if images:
             self.calls["frame"] += 1
             ts = float(re.search(r"Analyse this frame at timestamp ([\d.]+)s", prompt).group(1))
+            self.known_people_prompts.append((ts, re.search(r"KNOWN PEOPLE[^:]*: (.*)", prompt).group(1)))
+            p1_ok = [{"person_id": "P1", "appearance": self.P1, "issues": []}]
+            p1_bad = [{"person_id": "P1", "appearance": self.P1, "issues": ["missing_eye_protection"]}]
             if 24 <= ts < 25:
                 return LLMResponse('{"lab_type": "chemistry", "description": "cut off')   # unparseable
             if 10 <= ts < 20:
                 return LLMResponse(json.dumps({
                     "lab_type": "chemistry", "description": "Researcher handling acid without goggles.",
-                    "people_count": 1, "objects_involved": ["acid bottle", "beaker"],
+                    "people_count": 1, "people": p1_bad, "scene_issues": [],
+                    "objects_involved": ["acid bottle", "beaker"],
                     "actions_observed": ["pouring acid"],
                     "ppe_status": {"lab_coat": "worn", "gloves": "worn", "eye_protection": "missing"},
                     "checklist_findings": ["Researcher handling acid without goggles"],
@@ -49,14 +56,25 @@ class FakeLLM:
             if 30 <= ts < 40:
                 return LLMResponse(json.dumps({
                     "lab_type": "chemistry", "description": "Acid spill left uncleaned on the bench.",
-                    "people_count": 0, "objects_involved": ["spill", "bench"], "actions_observed": [],
+                    "people_count": 0, "people": [], "scene_issues": ["spill"],
+                    "objects_involved": ["spill", "bench"], "actions_observed": [],
                     "ppe_status": {"lab_coat": "cannot_determine"},
                     "checklist_findings": ["Chemical spill not cleaned up"],
                     "potential_violation": True, "violation_hint": "Uncleaned acid spill",
                     "severity": "medium", "confidence": 0.85}))
+            if 40 <= ts < 50:   # same person, same issue, worded differently → must NOT be a new violation
+                return LLMResponse(json.dumps({
+                    "lab_type": "chemistry", "description": "The same worker is back at the fume hood, eyes unprotected while decanting.",
+                    "people_count": 1, "people": p1_bad, "scene_issues": [],
+                    "objects_involved": ["fume hood", "flask"], "actions_observed": ["decanting"],
+                    "ppe_status": {"lab_coat": "worn", "gloves": "worn", "eye_protection": "missing"},
+                    "checklist_findings": ["No eye protection while decanting"],
+                    "potential_violation": True, "violation_hint": "Eye protection missing",
+                    "severity": "high", "confidence": 0.9}))
             return LLMResponse(json.dumps({
                 "lab_type": "chemistry", "description": "Researcher working with full PPE.",
-                "people_count": 1, "objects_involved": ["beaker"], "actions_observed": ["writing"],
+                "people_count": 1, "people": p1_ok, "scene_issues": [],
+                "objects_involved": ["beaker"], "actions_observed": ["writing"],
                 "ppe_status": {"lab_coat": "worn", "gloves": "worn", "eye_protection": "worn"},
                 "checklist_findings": [], "potential_violation": False,
                 "violation_hint": "None", "severity": "none", "confidence": 0.95}))
@@ -66,13 +84,14 @@ class FakeLLM:
         if "DETECTED EVENT" in prompt:
             self.calls["violation"] += 1
             spill = "spill" in prompt.lower().split("detected event")[1][:400]
-            return LLMResponse(json.dumps({
-                "is_violation": True,
+            return LLMResponse(json.dumps({"violations": [{
                 "violation_type": "Chemical Handling" if spill else "PPE",
+                "issues": ["spill"] if spill else ["missing_eye_protection"],
+                "person_ids": [] if spill else ["P1"],
                 "rule_violated": "Section 7.1 Spills" if spill else "Section 4.2 Eye protection",
                 "explanation": "Observed in footage.", "severity": "medium" if spill else "high",
                 "immediate_action": "Stop work.", "recommended_action": "Retrain.",
-                "preventive_measure": "Checklist."}))
+                "preventive_measure": "Checklist."}]}))
         if "executive_summary" in prompt:
             self.calls["summary"] += 1
             return LLMResponse(json.dumps({
@@ -81,11 +100,11 @@ class FakeLLM:
         raise AssertionError(f"Unexpected prompt: {prompt[:80]}")
 
 
-def _make_video(path: Path, seconds=40, fps=10):
+def _make_video(path: Path, seconds=50, fps=10):
     w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (320, 240))
-    colours = [(40, 160, 40), (40, 40, 200), (200, 160, 40), (160, 40, 160)]   # new scene every 10s
+    colours = [(40, 160, 40), (40, 40, 200), (200, 160, 40), (160, 40, 160), (40, 200, 200)]   # new scene every 10s
     for i in range(seconds * fps):
-        frame = np.full((240, 320, 3), colours[(i // (10 * fps)) % 4], np.uint8)
+        frame = np.full((240, 320, 3), colours[(i // (10 * fps)) % 5], np.uint8)
         cv2.putText(frame, f"{i / fps:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         w.write(frame)
     w.release()
@@ -182,3 +201,27 @@ class TestEndToEnd:
         assert "Invalid" in app.review_violation("garbage")[3]
         assert "Invalid" in app.review_violation("e2e-test|x|delete_everything")[3]
         assert "not found" in app.review_violation("../../etc|x|confirmed")[3]
+
+
+class TestPerPersonDeduplication:
+    def test_repeat_by_same_person_not_flagged_again(self, e2e_report):
+        report, env = e2e_report
+        assert report.total_violations == 2                       # not 3
+        ppe = next(v for v in report.violations if v.violation_type == "PPE")
+        assert ppe.event.people[0].person_id == "P1"
+        assert ppe.repeat_times() and all(40 <= t < 50 for t in ppe.repeat_times())
+        spill = next(v for v in report.violations if v.violation_type == "Chemical Handling")
+        assert spill.repeat_times() == []                          # P1's repeat doesn't leak onto the spill
+        assert report.metadata["repeats_merged"] >= 1
+        assert env["fake"].calls["violation"] == 2                # repeat skipped the reasoning call
+
+    def test_known_people_passed_to_later_frames(self, e2e_report):
+        _, env = e2e_report
+        later = [kp for ts, kp in env["fake"].known_people_prompts if ts >= 40]
+        assert later and all("P1: " + FakeLLM.P1 in kp for kp in later)
+
+    def test_report_lists_repeat_sightings(self, e2e_report):
+        report, env = e2e_report
+        html = (env["out"] / "report_e2e-test.html").read_text()
+        assert "Also seen at" in html and 'class="repeat-chip seek"' in html
+        assert 'class="marker-repeat seek"' in html and "👤 P1" in html

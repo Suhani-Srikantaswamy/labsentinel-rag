@@ -10,6 +10,13 @@ from pydantic import BaseModel, Field
 
 # ── Video Analysis Models ─────────────────────────────────────────────────────
 
+class PersonObservation(BaseModel):
+    """One person seen in a frame, tracked across frames by a stable ID (P1, P2, …)."""
+    person_id: str
+    appearance: str = ""                                 # clothing / hair / position — used to re-identify
+    issues: list[str] = Field(default_factory=list)      # normalised issue keys, e.g. "missing_eye_protection"
+
+
 class DetectedEvent(BaseModel):
     """A single event/observation detected in the incident video."""
     event_id: str
@@ -22,6 +29,11 @@ class DetectedEvent(BaseModel):
     severity: str = Field(default="unknown", description="low | medium | high | critical")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     frame_path: Optional[str] = None   # path to extracted frame image
+    people: list[PersonObservation] = Field(default_factory=list)
+    scene_issues: list[str] = Field(default_factory=list)       # hazards not tied to a person (spill, blocked exit…)
+    repeat_timestamps: list[float] = Field(default_factory=list)  # later sightings of the SAME person+issue
+    repeat_sightings: dict[str, list[float]] = Field(default_factory=dict)  # "P1:missing_gloves" → [ts, …]
+    already_reported: list[str] = Field(default_factory=list)   # issues in this frame flagged earlier ("P1: missing gloves")
 
 
 class VideoAnalysisResult(BaseModel):
@@ -32,6 +44,7 @@ class VideoAnalysisResult(BaseModel):
     events: list[DetectedEvent] = Field(default_factory=list)
     summary: str = ""
     failed_frames: int = 0     # frames the VLM could not analyse (API error / unparseable reply)
+    repeats_merged: int = 0    # flagged frames folded into an earlier violation (same person + same issue)
     analysis_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -72,6 +85,17 @@ class Violation(BaseModel):
     recommended_action: str = ""
     immediate_action: str = ""
     preventive_measure: str = ""
+    issues: list[str] = Field(default_factory=list)       # issue keys this violation covers
+    person_ids: list[str] = Field(default_factory=list)   # people this violation is about (P1, …)
+    def repeat_times(self) -> list[float]:
+        """Later sightings of THIS violation's person+issue (falls back to the whole event)."""
+        rs = self.event.repeat_sightings
+        if self.issues and rs:
+            owners = self.person_ids or ["scene"]
+            keys = {f"{o}:{i}" for o in owners for i in self.issues}
+            return sorted({t for k in keys for t in rs.get(k, [])})
+        return sorted(self.event.repeat_timestamps)
+
     # Human review — set from the web UI ("Confirm" / "False alarm" buttons)
     review_status: str = Field(default="pending", description="pending | confirmed | false_alarm")
     reviewed_at: Optional[datetime] = None

@@ -33,7 +33,9 @@ DETECTED EVENT
 Lab type   : {lab_type}
 Timestamp  : {timestamp}s
 Description: {description}
+People     : {people}
 Objects    : {objects}
+ALREADY REPORTED EARLIER (do NOT report these again): {already_reported}
 Actions    : {actions}
 AI severity: {vlm_severity}
 
@@ -51,23 +53,31 @@ SIMILAR PAST INCIDENTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR TASK — apply rules for a {lab_type} laboratory
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Is this a genuine safety violation for a {lab_type} lab?
-   Only confirm if the evidence directly supports it.
-2. Cite the EXACT rule — from the manual if present, or "Universal [{lab_type}]: ..."
-3. Explain what went wrong and the specific danger for this lab type.
-4. Give actionable recommendations appropriate for this lab type.
+1. List every GENUINE safety violation in this event for a {lab_type} lab — one entry per
+   distinct rule broken (e.g. missing PPE items together = ONE "PPE" entry; a spill is a
+   separate entry; food at the bench is a separate entry). Only include what the evidence
+   directly supports.
+2. Ignore anything listed under ALREADY REPORTED EARLIER — it is already in the report.
+   If nothing new remains, return an empty "violations" list.
+3. For each entry, cite the EXACT rule — from the manual if present, or "Universal [{lab_type}]: ..."
+4. Explain what went wrong and the specific danger, and give actionable recommendations.
+5. "issues" = the issue keys this entry covers, from: {issue_keys}
 
 Respond ONLY with valid JSON — no prose, no markdown:
 {{
-  "is_violation": <true|false>,
-  "violation_type": "<PPE | Chemical Handling | Equipment Misuse | Fire Hazard | Biological Safety | Electrical Safety | Ergonomics | Waste Disposal | Emergency | Food/Drink | Other>",
-  "rule_violated": "<exact quote from manual, or 'Universal [{lab_type}]: ...' if not in manual>",
-  "explanation": "<2-3 sentences: what was observed, why it violates the rule, the specific danger>",
-  "severity": "<low|medium|high|critical>",
-  "timestamp_sec": {timestamp},
-  "immediate_action": "<specific action needed RIGHT NOW>",
-  "recommended_action": "<corrective action for next 24-72 hours>",
-  "preventive_measure": "<systemic change to prevent recurrence>"
+  "violations": [
+    {{
+      "violation_type": "<PPE | Chemical Handling | Equipment Misuse | Fire Hazard | Biological Safety | Electrical Safety | Ergonomics | Waste Disposal | Emergency | Food/Drink | Other>",
+      "issues": ["<issue key>"],
+      "person_ids": ["<P1 …, empty for scene hazards>"],
+      "rule_violated": "<exact quote from manual, or 'Universal [{lab_type}]: ...' if not in manual>",
+      "explanation": "<2-3 sentences: what was observed, why it violates the rule, the specific danger>",
+      "severity": "<low|medium|high|critical>",
+      "immediate_action": "<specific action needed RIGHT NOW>",
+      "recommended_action": "<corrective action for next 24-72 hours>",
+      "preventive_measure": "<systemic change to prevent recurrence>"
+    }}
+  ]
 }}
 """
 
@@ -127,13 +137,28 @@ class ViolationReasoner:
         evidence: dict[str, list[RetrievedEvidence]],
         manual_text: str = "",
     ) -> Violation | None:
+        """Backwards-compatible: first confirmed violation for the event (or None)."""
+        found = self.analyse_event_all(event, evidence, manual_text)
+        return found[0] if found else None
+
+    def analyse_event_all(
+        self,
+        event: DetectedEvent,
+        evidence: dict[str, list[RetrievedEvidence]],
+        manual_text: str = "",
+    ) -> list[Violation]:
+        """All distinct, NEW violations in one event (one per rule broken)."""
+        from src.vlm.video_analyzer import ISSUE_KEYS, _norm_issue
         manual_ctx = _build_manual_ctx(manual_text)
         prompt = VIOLATION_PROMPT.format(
             manual_context     = manual_ctx,
             lab_type           = next((o.split(":")[1] for o in event.objects_involved if o.startswith("lab_type:")), "general"),
             timestamp          = event.timestamp_sec,
             description        = event.description,
-            objects            = ", ".join(event.objects_involved) or "N/A",
+            people             = _fmt_people(event),
+            already_reported   = "; ".join(event.already_reported) or "nothing",
+            issue_keys         = ", ".join(ISSUE_KEYS),
+            objects            = ", ".join(o for o in event.objects_involved if not o.startswith("lab_type:")) or "N/A",
             actions            = ", ".join(event.actions_observed) or "N/A",
             vlm_severity       = event.severity,
             sop_evidence       = _fmt(evidence.get("sops", [])),
@@ -144,35 +169,67 @@ class ViolationReasoner:
             resp = self.client.chat(
                 prompt      = prompt,
                 temperature = 0.15,
-                max_tokens  = 800,
+                max_tokens  = 1600,
             )
             data = parse_llm_json(resp.text)
             if not data:
                 raise ValueError("unparseable reasoning reply")
-            if not _as_bool(data.get("is_violation", False)):
-                logger.debug(f"No violation confirmed @ {event.timestamp_sec}s")
-                return None
-            return Violation(
-                violation_id       = str(uuid.uuid4()),
-                event              = event,
-                violation_type     = str(data.get("violation_type") or "Unknown"),
-                rule_violated      = str(data.get("rule_violated") or "Unspecified"),
-                explanation        = str(data.get("explanation") or ""),
-                severity           = _norm_severity(data.get("severity"), event.severity),
-                sop_evidence       = evidence.get("sops", []),
-                similar_incidents  = evidence.get("incidents", []),
-                equipment_notes    = evidence.get("manuals", []),
-                immediate_action   = data.get("immediate_action", ""),
-                recommended_action = data.get("recommended_action", ""),
-                preventive_measure = data.get("preventive_measure", ""),
-            )
+
+            # Accept the list format, and the older single-object format
+            if isinstance(data.get("violations"), list):
+                items = [x for x in data["violations"] if isinstance(x, dict)]
+            elif _as_bool(data.get("is_violation", False)):
+                items = [data]
+            else:
+                items = []
+
+            # Issue keys already reported earlier (e.g. "P1: missing gloves" → ("P1","missing_gloves"))
+            done = set()
+            for entry in event.already_reported:
+                who, _, iss = entry.partition(":")
+                done.add((who.strip(), _norm_issue(iss)))
+
+            out: list[Violation] = []
+            seen_types: set[str] = set()
+            for item in items:
+                issues = [k for k in (_norm_issue(i) for i in (item.get("issues") or [])) if k]
+                pids = [str(x).strip().upper() for x in (item.get("person_ids") or []) if str(x).strip()]
+                owners = pids or [p.person_id for p in event.people if set(p.issues) & set(issues)] or ["scene"]
+                # Safety net: drop entries whose issues were ALL reported before
+                if issues and all(any((o, i) in done for o in owners) or ("scene", i) in done for i in issues):
+                    logger.debug(f"Skipping already-reported {item.get('violation_type')} @ {event.timestamp_sec}s")
+                    continue
+                vtype = str(item.get("violation_type") or "Unknown")
+                key = (vtype.lower(), tuple(sorted(owners)))
+                if key in seen_types:          # same type for same people twice in one reply
+                    continue
+                seen_types.add(key)
+                out.append(Violation(
+                    violation_id       = str(uuid.uuid4()),
+                    event              = event,
+                    violation_type     = vtype,
+                    rule_violated      = str(item.get("rule_violated") or "Unspecified"),
+                    explanation        = str(item.get("explanation") or ""),
+                    severity           = _norm_severity(item.get("severity"), event.severity),
+                    sop_evidence       = evidence.get("sops", []),
+                    similar_incidents  = evidence.get("incidents", []),
+                    equipment_notes    = evidence.get("manuals", []),
+                    immediate_action   = str(item.get("immediate_action") or ""),
+                    recommended_action = str(item.get("recommended_action") or ""),
+                    preventive_measure = str(item.get("preventive_measure") or ""),
+                    issues             = issues,
+                    person_ids         = [o for o in owners if o != "scene"],
+                ))
+            if not out:
+                logger.debug(f"No new violation confirmed @ {event.timestamp_sec}s")
+            return out
         except FatalLLMError:
             raise
         except Exception as e:
             # Don't silently drop an event the vision model flagged — keep it, marked unverified
             self.failed_events += 1
             logger.error(f"Reasoning failed @ {event.timestamp_sec}s: {e} — keeping as unverified")
-            return Violation(
+            return [Violation(
                 violation_id       = str(uuid.uuid4()),
                 event              = event,
                 violation_type     = "Unverified (reasoning step failed)",
@@ -184,7 +241,7 @@ class ViolationReasoner:
                 similar_incidents  = evidence.get("incidents", []),
                 equipment_notes    = evidence.get("manuals", []),
                 immediate_action   = "Review this moment of the footage.",
-            )
+            )]
 
     def build_report(
         self,
@@ -261,6 +318,18 @@ class ViolationReasoner:
                 "output_dir":            output_dir or str(OUTPUT_DIR),
             },
         )
+
+
+def _fmt_people(event: DetectedEvent) -> str:
+    parts = []
+    for p in event.people:
+        if p.issues:
+            parts.append(f"{p.person_id} ({p.appearance or 'no description'}): {', '.join(p.issues)}")
+    if event.scene_issues:
+        parts.append("Scene: " + ", ".join(event.scene_issues))
+    if event.repeat_timestamps:
+        parts.append("Same issue seen again at: " + ", ".join(format_human_time(t) for t in event.repeat_timestamps))
+    return "; ".join(parts) or "N/A"
 
 
 def _norm_severity(value, default: str = "medium") -> str:

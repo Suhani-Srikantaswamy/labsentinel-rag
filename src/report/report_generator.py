@@ -71,13 +71,29 @@ def _rule_source(rule: str) -> str:
     return "🌐 Universal Rule" if "universal" in r else "📋 From Lab Manual"
 
 
+def _people_labels(event, violation=None) -> list[dict]:
+    """[{label, issues}] for people with issues in this event (only this violation's, if given)."""
+    out = []
+    only_ids = set(violation.person_ids) if violation is not None and violation.person_ids else None
+    only_issues = set(violation.issues) if violation is not None and violation.issues else None
+    for p in getattr(event, "people", []) or []:
+        if not p.issues or (only_ids is not None and p.person_id not in only_ids):
+            continue
+        issues = [i for i in p.issues if only_issues is None or i in only_issues] or p.issues
+        who = p.person_id if p.person_id != "P?" else "Person"
+        label = f"{who} · {p.appearance[:60]}" if p.appearance else who
+        out.append({"label": label, "issues": ", ".join(i.replace("_", " ") for i in issues)})
+    return out
+
+
 def _duration(report: InvestigationReport) -> float:
     try:
         d = float(report.metadata.get("duration_sec") or 0)
     except (TypeError, ValueError):
         d = 0.0
     latest = max([e.timestamp_sec for e in report.timeline] +
-                 [v.event.timestamp_sec for v in report.violations] + [0.0])
+                 [v.event.timestamp_sec for v in report.violations] +
+                 [t for v in report.violations for t in v.repeat_times()] + [0.0])
     return max(d, latest + 1.0, 1.0)
 
 
@@ -110,6 +126,16 @@ def timeline_svg(report: InvestigationReport) -> str:
         parts.append(f'<text x="{xx:.1f}" y="{axis_y + 26}" font-size="14" fill="#94a3b8" '
                      f'text-anchor="middle" font-family="monospace">{_e(format_human_time(t))}</text>')
         t += step
+
+    # Repeat sightings: small hollow dots on the axis, same colour, clickable
+    for v in report.violations:
+        col = FALSE_ALARM_COLOR if v.review_status == "false_alarm" else severity_color(v.severity)
+        for rt in v.repeat_times():
+            rx = x(rt)
+            parts.append(
+                f'<g class="marker-repeat seek" data-seek="{rt:.2f}" style="cursor:pointer">'
+                f'<title>{_e(format_human_time(rt))} — repeat of {_e(v.violation_type)} (not flagged again)</title>'
+                f'<circle cx="{rx:.1f}" cy="{axis_y}" r="5" fill="#0f172a" stroke="{col}" stroke-width="2"/></g>')
 
     # Stagger markers that would overlap
     rows_last_x = [-1e9, -1e9, -1e9]
@@ -208,6 +234,8 @@ class ReportGenerator:
                 "severity": e.severity,
                 "color": severity_color(e.severity),
                 "false_alarm": review_by_event.get(e.event_id) == "false_alarm",
+                "people": ", ".join(p["label"].split(" · ")[0] for p in _people_labels(e)),
+                "repeats": len(e.repeat_timestamps),
             })
 
         violations = []
@@ -219,6 +247,8 @@ class ReportGenerator:
                 "color": severity_color(v.severity),
                 "rule_source": _rule_source(v.rule_violated),
                 "thumb": self._thumbnail_data_uri(v.event.frame_path),
+                "people": _people_labels(v.event, v),
+                "repeats": [{"ts": f"{t:.2f}", "label": _fmt_ts(t)} for t in v.repeat_times()],
                 "review_label": REVIEW_LABELS.get(v.review_status, v.review_status),
                 "review_color": REVIEW_COLORS.get(v.review_status, REVIEW_COLORS["pending"]),
             })
@@ -233,6 +263,7 @@ class ReportGenerator:
             review=report.review_counts(),
             events=events,
             violations=violations,
+            repeats_merged=report.metadata.get("repeats_merged", 0) or 0,
             chart_svg=Markup(timeline_svg(report)),
             legend=[(s, SEVERITY_COLORS[s]) for s in SEVERITY_ORDER],
             false_alarm_color=FALSE_ALARM_COLOR,
@@ -364,7 +395,12 @@ class ReportGenerator:
                     f"<font color='{col}'><b>Review:</b> {_e(REVIEW_LABELS.get(v.review_status, v.review_status))}</font>",
                     ParagraphStyle("Rev", parent=body_style, keepWithNext=1)))
 
-            text = [
+            text = []
+            people = _people_labels(v.event, v)
+            if people:
+                text.append(Paragraph("<b>Person:</b> " + "; ".join(
+                    f"{_e(p['label'])} ({_e(p['issues'])})" for p in people), body_style))
+            text += [
                 Paragraph(f"<b>Rule Violated:</b> {_e(v.rule_violated)}", body_style),
                 Paragraph(f"<b>Explanation:</b> {_e(v.explanation)}", body_style),
                 Paragraph(f"<b>Immediate Action:</b> {_e(v.immediate_action)}", body_style),
@@ -372,6 +408,10 @@ class ReportGenerator:
             ]
             if v.preventive_measure:
                 text.append(Paragraph(f"<b>Preventive Measure:</b> {_e(v.preventive_measure)}", body_style))
+            if v.repeat_times():
+                text.append(Paragraph(
+                    "<b>Also seen at (not flagged again):</b> "
+                    + ", ".join(_fmt_ts(t) for t in v.repeat_times()), body_style))
 
             img = self._pdf_image(v.event.frame_path, RLImage, max_w=6.2 * cm)
             if img is not None:
@@ -428,6 +468,11 @@ class ReportGenerator:
             d.add(String(xx, axis_y - 17, format_human_time(t), fontSize=6.5, fillColor=colors.HexColor("#64748b"),
                          textAnchor="middle", fontName="Courier"))
             t += step
+
+        for v in report.violations:
+            col = colors.HexColor(FALSE_ALARM_COLOR if v.review_status == "false_alarm" else severity_color(v.severity))
+            for rt in v.repeat_times():
+                d.add(Circle(x(rt), axis_y, 2.5, fillColor=colors.white, strokeColor=col, strokeWidth=1))
 
         rows_last_x = [-1e9, -1e9, -1e9]
         for v in sorted(report.violations, key=lambda v: v.event.timestamp_sec):

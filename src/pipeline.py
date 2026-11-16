@@ -107,12 +107,11 @@ class LabSentinelPipeline:
         self.reasoner.failed_events = 0
         for i, event in enumerate(violation_events):
             evidence  = all_evidence.get(event.event_id, {})
-            violation = self.reasoner.analyse_event(event, evidence, manual_text)
-            if violation:
-                violations.append(violation)
+            found = self.reasoner.analyse_event_all(event, evidence, manual_text)
+            violations.extend(found)
             _prog(0.68 + (i + 1) / max(n, 1) * 0.18,
-                  f"{'✗ Violation confirmed' if violation else '✓ No violation'} "
-                  f"@ {event.timestamp_sec:.1f}s")
+                  (f"✗ {len(found)} violation(s) confirmed" if found else "✓ No new violation")
+                  + f" @ {event.timestamp_sec:.1f}s")
 
         # ── Stage 5: Report ───────────────────────────────────────────────────
         _prog(0.87, "Stage 5 — Building report …")
@@ -130,6 +129,7 @@ class LabSentinelPipeline:
                 "step failed — they are listed as unverified violations.")
         report.metadata["warnings"] = warnings
         report.metadata["failed_frames"] = video_result.failed_frames
+        report.metadata["repeats_merged"] = video_result.repeats_merged
         output_paths = ReportGenerator(output_dir=output_dir).generate_all(report)
         _prog(1.0, f"Done — {report.total_violations} violations, "
                    f"risk: {report.overall_risk_level.upper()}")

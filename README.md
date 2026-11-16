@@ -35,6 +35,7 @@ LabSentinel-RAG investigates lab safety incidents automatically using a 5-stage 
 - **Click-to-play timestamps** — click any timestamp, chart marker or screenshot to jump the evidence player to that moment
 - **Violation timeline chart** — severity-coloured markers across the whole video
 - **Human review** — ✓ Confirm / ✗ False alarm on each violation, saved into the report
+- **No repeat flags** — each person is tracked across frames (P1, P2 …); once someone is flagged for an issue, later sightings are listed under "Also seen at" instead of becoming new violations
 
 ---
 

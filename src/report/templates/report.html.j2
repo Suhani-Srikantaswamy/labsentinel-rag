@@ -83,6 +83,14 @@
                          overflow-wrap: anywhere; word-break: break-word; }
     .lsr .rule-box, .lsr .explanation, .lsr td { overflow-wrap: anywhere; }
     .lsr .evidence-box strong { color: #93c5fd; }
+    .lsr .people { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+    .lsr .person { font-size: 0.75em; padding: 3px 10px; border-radius: 999px; background: rgba(255,122,89,0.12);
+                   border: 1px solid rgba(255,122,89,0.35); color: #fdba74; }
+    .lsr .repeats { font-size: 0.8em; color: var(--muted); margin: 6px 0 4px; }
+    .lsr .repeat-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 8px; border-radius: 10px;
+                        background: rgba(59,130,246,0.12); color: #93c5fd; font-family: monospace; cursor: pointer; }
+    .lsr .repeat-chip:hover { background: rgba(59,130,246,0.3); }
+    .lsr .note { font-size: 0.8em; color: var(--muted); margin: -12px 0 18px; }
     .lsr .review { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px;
                    padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.82em; }
     .lsr .review-status { font-weight: 700; padding: 3px 10px; border-radius: 999px; color: #fff; }
@@ -126,6 +134,10 @@
   </div>
 </div>
 
+{% if repeats_merged %}
+<div class="note">ℹ {{ repeats_merged }} repeat sighting(s) of an already-flagged person and issue were not flagged again — they're listed under "Also seen at" on the original violation.</div>
+{% endif %}
+
 <h2>Executive Summary</h2>
 {% for w in warnings %}<div class="warning-banner">⚠ {{ w }}</div>{% endfor %}
 <div class="summary-box">{{ r.incident_summary }}</div>
@@ -156,7 +168,7 @@
   {% for e in events %}
     <tr>
       <td><span class="ts-link seek" data-seek="{{ e.ts }}" title="Jump to {{ e.ts_label }}">▶ {{ e.ts_label }}</span></td>
-      <td>{{ e.description }}</td>
+      <td>{{ e.description }}{% if e.people %}<br><span style="color:#fdba74;font-size:0.85em">👤 {{ e.people }}</span>{% endif %}{% if e.repeats %}<br><span style="color:#94a3b8;font-size:0.85em">↻ also seen {{ e.repeats }}×</span>{% endif %}</td>
       <td style="color:#64748b;font-size:0.85em">{{ e.objects or "—" }}</td>
       <td><span class="badge" style="background:{{ e.color }}">{{ e.severity|upper }}</span></td>
     </tr>
@@ -177,9 +189,17 @@
   </div>
   <div class="v-body">
     <div class="v-main">
+      {% if item.people %}
+      <div class="people">{% for who in item.people %}<span class="person" title="{{ who.issues }}">👤 {{ who.label }}</span>{% endfor %}</div>
+      {% endif %}
       <div class="source-tag">{{ item.rule_source }}</div>
       <div class="rule-box"><strong>Rule Violated:</strong> {{ v.rule_violated }}</div>
       <p class="explanation">{{ v.explanation }}</p>
+      {% if item.repeats %}
+      <div class="repeats">↻ Also seen at ({{ item.repeats|length }}, not flagged again):
+        {% for rep in item.repeats %}<span class="repeat-chip seek" role="button" tabindex="0" data-seek="{{ rep.ts }}" title="Jump to {{ rep.label }}">{{ rep.label }}</span>{% endfor %}
+      </div>
+      {% endif %}
     </div>
     {% if item.thumb %}
     <div class="v-shot">
