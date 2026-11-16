@@ -281,7 +281,7 @@ def _run_pipeline(video_path, manual_text, sample_rate, max_frames, chunk_sec, p
 # ── Main investigation ────────────────────────────────────────────────────────
 
 def investigate(video_file, video_url, manual_files,
-                sample_rate, max_frames, chunk_sec,
+                sample_rate=None, max_frames=None, chunk_sec=None,
                 progress=gr.Progress(track_tqdm=False)):
 
     manual_files = _normalize_manual_files(manual_files)
@@ -348,7 +348,7 @@ def investigate(video_file, video_url, manual_files,
             return _err("All API keys are exhausted", [
                 "Every configured Gemini API key has reached its daily quota.",
                 "Add another key in .env (GOOGLE_API_KEY_2=..., GOOGLE_API_KEY_3=...) or wait for the quota to reset.",
-                "You can also reduce Max Frames in Advanced Settings to use fewer requests.",
+                "You can also set LABSENTINEL_MAX_FRAMES in .env to a smaller number to use fewer requests.",
             ]), "", "{}", None, _stat("❌", "All API keys exhausted"), _load_history(5), None, gr.update(visible=False)
         return _err("Investigation Failed", [err]), "", "{}", None, _stat("❌", err[:80]), _load_history(5), None, gr.update(visible=False)
 
@@ -1380,12 +1380,6 @@ def create_app():
                                               placeholder="https://youtube.com/watch?v=...", lines=1)
                         gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:4px 0 14px;line-height:1.5">'
                                 '⚡ Same URL cached — re-runs are instant.</p>')
-                        with gr.Accordion("⚙  Advanced Settings", open=False):
-                            gr.HTML('<p style="color:var(--ls-text3);font-size:0.76em;margin:0 0 10px">Leave 0 for automatic (scales with video length)</p>')
-                            with gr.Row():
-                                sr_in = gr.Number(label="Frame rate (s)", value=0, minimum=0, maximum=60, precision=0)
-                                mf_in = gr.Number(label="Max frames", value=0, minimum=0, maximum=500, precision=0)
-                            chunk_in = gr.Number(label="Chunk size (s)", value=0, minimum=0, maximum=7200, precision=0)
                         run_btn    = gr.Button("🚀  Run Investigation", variant="primary", size="lg", elem_id="run-btn")
                         status_out = gr.HTML(value='<div style="height:36px"></div>')
                         pdf_out = gr.File(label="📥 Download PDF Report", elem_classes="pdf-btn", height=64)
@@ -1413,7 +1407,7 @@ def create_app():
 
                 run_btn.click(
                     fn=investigate,
-                    inputs=[video_in, url_in, manual_in, sr_in, mf_in, chunk_in],
+                    inputs=[video_in, url_in, manual_in],
                     outputs=[report_html, overview_html, json_out, pdf_out, status_out, history_out,
                              evidence_video, results_row],
                 )

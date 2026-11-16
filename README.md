@@ -163,7 +163,7 @@ labsentinel-rag/
 
 ## Configuration
 
-All settings via `.env` — nothing hardcoded:
+All settings via `.env` — nothing hardcoded. Frame sampling is automatic; these are only for fine-tuning:
 
 ```bash
 # Model
@@ -177,6 +177,7 @@ LABSENTINEL_TRANSIENT_RETRIES=4     # retries on 503 / timeouts
 # Video analysis
 LABSENTINEL_FRAME_RATE=6          # minimum spacing of the evenly spaced frames (s)
 LABSENTINEL_MAX_FRAMES=auto       # auto = 1 frame / 10 s, between 24 and 90 frames
+LABSENTINEL_CHUNK_SEC=180         # long videos are processed in chunks of N seconds
 
 # Speed
 LABSENTINEL_FRAMES_PER_REQUEST=6  # consecutive frames analysed in one request
